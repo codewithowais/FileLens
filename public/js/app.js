@@ -115,7 +115,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (durationDisplay) durationDisplay.textContent = formatTime(totalDuration());
   }
   // While the slider is being dragged the playback loop must not move it back under the user's finger
-  let scrubbing = false, scrubTarget = 0, pendingSeek = null;
+  let scrubbing = false, scrubTarget = 0, pendingSeek = null, seekLoading = false;
   function refreshTransport() {
     if (scrubbing) return;
     const total = totalDuration(), t = windowOffset() + audioEngine.getCurrentTime();
@@ -127,13 +127,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const total = totalDuration();
     if (!(total > 0)) return;
     t = Math.max(0, Math.min(total - 0.05, t));
-    if (studioState === 'loading') { pendingSeek = { t, resume }; return; }   // applied when the loading part is ready
+    if (studioState === 'loading') {                                          // a part is loading: remember only the latest request
+      if (seekLoading) pendingSeek = { t, resume };                            // …and only when this function started that load
+      return;
+    }
     const off = windowOffset(), len = audioEngine.getDuration();
     if (!audioEngine.isExcerpt || (t >= off && t < off + len - 0.05)) {
       audioEngine.seek(t - off);
     } else {
       showToast('Loading that part of the recording…', 'info', 2500);
-      await previewFrom(t);
+      pendingSeek = null; seekLoading = true;
+      try { await previewFrom(t); } finally { seekLoading = false; }
       const next = pendingSeek; pendingSeek = null;
       if (next) return seekGlobal(next.t, next.resume);
       const o2 = windowOffset();

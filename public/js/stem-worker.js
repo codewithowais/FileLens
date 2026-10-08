@@ -1,6 +1,6 @@
 // Background worker: re-synthesizes one segment of the recording (see AudioEngine.synthSegment).
 self.window = self;
-importScripts('audio-engine.js');
+importScripts('audio-engine.js' + self.location.search);   // same version as the page
 self.onmessage = async (e) => {
   try {
     const job = e.data;

@@ -340,19 +340,22 @@ class AudioEngine {
    * slower to decode and more than twice the samples to analyse.
    */
   useContextRate(rate) {
-    const target = Math.max(16000, Math.min(48000, Math.round(rate || 0)));
-    if (!rate || (this.audioContext && this.audioContext.sampleRate === target)) return;
+    const target = rate ? Math.max(16000, Math.min(48000, Math.round(rate))) : 0;   // 0 = the browser's default rate
+    if (!this.audioContext) { if (!target) return; }
+    else if (target ? this.audioContext.sampleRate === target : !this._customRate) return;
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass) return;
     let ctx;
-    try { ctx = new AudioContextClass({ sampleRate: target }); } catch (e) { return; }   // unsupported: keep the default
+    try { ctx = target ? new AudioContextClass({ sampleRate: target }) : new AudioContextClass(); } catch (e) { return; }   // unsupported: keep what we have
     if (this.audioContext) {
       this.stopSources();
       try { this.audioContext.close(); } catch (e) {}
-      this.isGraphSetup = false; this.stemGains = {};                                    // the old graph belonged to the old context
-      this.analyser = null; this.masterGain = null; this.originalGain = null; this.cleanedGain = null;
+      // the old graph belonged to the old context: setupAudioGraph builds a new one
+      this.isGraphSetup = false; this.stemGains = {};
+      for (const n of ['stemBus', 'hpFilter', 'notchHum', 'deEsser', 'eqLow', 'eqMid', 'eqHigh', 'compressor', 'limiter', 'softClip', 'analyser', 'masterGain', 'originalGain', 'cleanedGain']) this[n] = null;
     }
     this.audioContext = ctx;
+    this._customRate = !!target;
   }
 
   async resumeAudioContextIfNeeded() {
@@ -369,7 +372,7 @@ class AudioEngine {
    * Decodes an ArrayBuffer (from uploaded file) into an AudioBuffer.
    */
   async decodeAudio(arrayBuffer, sampleRateHint = 0) {
-    if (sampleRateHint) this.useContextRate(sampleRateHint);
+    this.useContextRate(sampleRateHint);   // 0 (unknown rate) goes back to the browser default
     this.initAudioContext();
     // Clone array buffer because decodeAudioData detaches it
     const bufferCopy = arrayBuffer.slice(0);
@@ -582,14 +585,17 @@ class AudioEngine {
    */
   async runSegments(count, jobFor, merge, onProgress, abortSignal) {
     const useWorkers = count > 1 && typeof Worker !== 'undefined' && this.useWorkers !== false;
+    const merged = new Set();                               // a segment must be added to the stems exactly once
+    const mergeOnce = (res, g) => { merge(res); merged.add(g); };
     if (useWorkers) {
-      try { await this.runSegmentsOnWorkers(count, jobFor, merge, onProgress, abortSignal); return; }
+      try { await this.runSegmentsOnWorkers(count, jobFor, mergeOnce, onProgress, abortSignal); return; }
       catch (err) { if (err && err.name === 'AbortError') throw err; console.warn('Workers unavailable, using the main thread:', err); this.useWorkers = false; }
     }
     for (let g = 0; g < count; g++) {
+      if (merged.has(g)) continue;                          // a worker already delivered this one before it failed
       if (abortSignal && abortSignal.aborted) throw AudioEngine.abortError();
       const res = await AudioEngine.synthSegment(jobFor(g), (p) => onProgress(g, p), abortSignal, true);
-      merge(res); onProgress(g, 1);
+      mergeOnce(res, g); onProgress(g, 1);
     }
   }
 
@@ -612,7 +618,7 @@ class AudioEngine {
             const m = e.data;
             if (m.progress !== undefined) { onProgress(g, m.progress); return; }
             if (m.error) { finish(new Error(m.error)); return; }
-            try { merge(m.result); } catch (err) { finish(err); return; }
+            try { merge(m.result, g); } catch (err) { finish(err); return; }
             onProgress(g, 1);
             if (--pending === 0) finish();
           };
@@ -732,7 +738,7 @@ class AudioEngine {
     // Pass 2: multi-component spectral masking and inverse STFT synthesis. The frames are split into
     // segments that run in parallel on background workers (or one after another when workers are
     // unavailable); each segment's output is added into the stems where they overlap.
-    const segCount = this.planSegments(numFrames);
+    const segCount = numFrames < 1 ? 0 : this.planSegments(numFrames);   // under one frame (~46 ms): nothing to separate
     const bounds = [];
     for (let g = 0; g < segCount; g++) bounds.push([Math.floor(numFrames * g / segCount), Math.floor(numFrames * (g + 1) / segCount)]);
     const segProgress = new Array(segCount).fill(0);
@@ -753,7 +759,7 @@ class AudioEngine {
       return { left: inputLeft.slice(a, b), right: isStereo ? inputRight.slice(a, b) : null, isStereo, sampleRate, noiseFloor,
         warm, nFrames: f1 - f0, sampleStart: a + warm * hopSize };
     };
-    await this.runSegments(segCount, jobFor, merge, (g, p) => { segProgress[g] = p; reportProgress(); }, abortSignal);
+    if (segCount) await this.runSegments(segCount, jobFor, merge, (g, p) => { segProgress[g] = p; reportProgress(); }, abortSignal);
 
     const tSynth = AudioEngine.now();
     // Normalize overlap-add by window sum
@@ -1675,6 +1681,11 @@ class FastFFT {
       imag[i] = -imag[i] * inv;
     }
   }
+}
+
+// Background workers load the same (cache-busted) copy of this file as the page
+if (typeof document !== 'undefined' && document.currentScript && document.currentScript.src) {
+  try { const u = new URL(document.currentScript.src); AudioEngine.workerUrl = new URL('stem-worker.js' + u.search, u).href; } catch (e) {}
 }
 
 window.AudioEngine = AudioEngine;
