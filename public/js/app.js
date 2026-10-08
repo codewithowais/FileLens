@@ -172,6 +172,33 @@ document.addEventListener('DOMContentLoaded', () => {
   const excerptStartInput = document.getElementById('excerptStart');
   if (excerptStartInput) excerptStartInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') btnExcerptApply.click(); });
 
+  // ---- Whole original: streams the untouched file with the browser's own player (low memory) ----
+  const originalPlayer = document.getElementById('originalPlayer');
+  const originalPlayerWrap = document.getElementById('originalPlayerWrap');
+  const btnPlayOriginal = document.getElementById('btnPlayOriginal');
+  let originalPlayerUrl = null;
+  function closeOriginalPlayer() {
+    if (!originalPlayer) return;
+    try { originalPlayer.pause(); } catch (e) {}
+    originalPlayer.removeAttribute('src');
+    try { originalPlayer.load(); } catch (e) {}
+    if (originalPlayerUrl) { URL.revokeObjectURL(originalPlayerUrl); originalPlayerUrl = null; }
+    if (originalPlayerWrap) originalPlayerWrap.style.display = 'none';
+    if (btnPlayOriginal) btnPlayOriginal.textContent = 'Play whole original';
+  }
+  if (btnPlayOriginal && originalPlayer) btnPlayOriginal.addEventListener('click', () => {
+    if (originalPlayerUrl) { closeOriginalPlayer(); return; }
+    if (!currentFile) return;
+    stopPlayback();
+    originalPlayerUrl = URL.createObjectURL(currentFile);
+    originalPlayer.src = originalPlayerUrl;
+    originalPlayerWrap.style.display = 'flex';
+    btnPlayOriginal.textContent = 'Close original player';
+    originalPlayer.play().catch(() => {});
+  });
+  // Never play the original and the studio at the same time
+  if (originalPlayer) originalPlayer.addEventListener('play', () => { if (audioEngine.isPlaying) stopPlayback(); });
+
   function prepareStudio() {
     if (studioState === 'ready' || studioState === 'loading') return studioPromise;
     if (!pendingAudioBytes || !currentFile) return Promise.resolve();
@@ -653,6 +680,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function handleIncomingFile(file) {
     stopPlayback();
+    closeOriginalPlayer();
     // Each file gets its own abort signal so a previous file's background work stops
     if (activeAbortController) activeAbortController.abort();
     activeAbortController = new AbortController();
@@ -2479,6 +2507,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   function togglePlayPause() {
+    if (originalPlayer && !originalPlayer.paused && !audioEngine.isPlaying) originalPlayer.pause();
     if (!audioEngine.originalBuffer) {
       showToast("Please upload an audio/video file first or load a demo!", "warning", 3000);
       return;

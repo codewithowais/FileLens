@@ -152,6 +152,11 @@
             <label for="excerptStart">Preview from</label>
             <input type="text" id="excerptStart" class="excerpt-input" value="0:00" size="7" inputmode="numeric" aria-label="Preview start time (minutes:seconds)">
             <button type="button" id="btnExcerptApply" class="btn btn-sm btn-outline">Preview this part</button>
+            <button type="button" id="btnPlayOriginal" class="btn btn-sm btn-outline" title="Play the whole original file from start to finish, without cleaning">Play whole original</button>
+          </div>
+          <div id="originalPlayerWrap" class="original-player" style="display: none;">
+            <span class="original-player-note">Original file, no cleaning applied.</span>
+            <audio id="originalPlayer" controls preload="metadata"></audio>
           </div>
         </div>
         <div class="studio-quick-bar">
@@ -854,6 +859,6 @@
   <script src="js/ffprobe-parser.js?v=3.50"></script>
   <script src="js/audio-exporter.js?v=3.50"></script>
   <script src="js/mp4-muxer.js?v=3.50"></script>
-  <script src="js/app.js?v=3.53"></script>
+  <script src="js/app.js?v=3.54"></script>
 </body>
 </html>

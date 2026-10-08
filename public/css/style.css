@@ -2604,6 +2604,10 @@ body { font-size: 14.5px; line-height: 1.5; }
 .excerpt-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s3); padding: var(--s3) var(--s4); background: var(--warn-bg); border: 1px solid color-mix(in srgb, var(--accent-amber) 45%, transparent); border-radius: var(--radius-md); font-size: .86rem; color: var(--text-body); line-height: 1.5; }
 .excerpt-text { flex: 1 1 360px; min-width: 0; }
 .excerpt-controls { display: flex; align-items: center; gap: var(--s2); }
+.excerpt-controls { flex-wrap: wrap; }
+.original-player { flex: 1 1 100%; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3); }
+.original-player audio { flex: 1 1 320px; min-width: 0; height: 40px; }
+.original-player-note { font-size: .8rem; color: var(--text-muted); }
 .excerpt-controls label { font-size: .8rem; color: var(--text-muted); }
 .excerpt-input { width: 78px; background: var(--bg-input); color: var(--text-main); border: 1px solid var(--border-main); border-radius: var(--radius-sm); padding: 6px 8px; font-family: var(--font-mono); font-size: .86rem; text-align: center; }
 
