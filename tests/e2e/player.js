@@ -1,6 +1,9 @@
 /**
  * End-to-end test of the Audio Cleaning player in a real browser (needs Playwright + Chromium).
  *   node tests/e2e/player.js
+ * Formats and browsers (the Chromium that Playwright ships cannot decode AAC/m4a):
+ *   E2E_FORMAT=m4a ELECTRON_PATH=/path/to/electron xvfb-run -a node tests/e2e/player.js
+ * E2E_FORMAT=m4a encodes the test file to AAC with ffmpeg; ELECTRON_PATH runs the page in Electron (Chrome with AAC).
  * Builds an 8-minute test recording whose pitch encodes the minute (300 Hz + 100 Hz per minute), so the test can
  * check not only the clock but that the audio actually loaded for a position is the audio from that position.
  */
@@ -30,7 +33,11 @@ const near = (a, b, tol) => Math.abs(a - b) <= tol;
 const clock = (txt) => { const m = txt.trim().split(':').map(Number); return m.length === 3 ? m[0] * 3600 + m[1] * 60 + m[2] : m[0] * 60 + m[1]; };
 
 (async () => {
-  const wav = path.join(os.tmpdir(), `filelens_player_test_${process.pid}.wav`); makeWav(wav);
+  let wav = path.join(os.tmpdir(), `filelens_player_test_${process.pid}.wav`); makeWav(wav);
+  if (process.env.E2E_FORMAT === 'm4a') {            // same recording as AAC in an m4a container, 22.05 kHz like many voice memos
+    const m4a = wav.replace(/\.wav$/, '.m4a');
+    cp.execSync(`ffmpeg -loglevel error -y -i "${wav}" -ar ${SR} -c:a aac -b:a 48k "${m4a}"`); fs.unlinkSync(wav); wav = m4a;
+  }
   const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
   const server = http.createServer((req, res) => {
     const f = path.join(root, decodeURIComponent(req.url.split('?')[0]).replace(/^\/$/, '/index.html'));
@@ -38,9 +45,17 @@ const clock = (txt) => { const m = txt.trim().split(':').map(Number); return m.l
     res.writeHead(200, { 'Content-Type': types[path.extname(f)] || 'application/octet-stream' }); fs.createReadStream(f).pipe(res);
   }).listen(0);
   const port = server.address().port;
-  const exe = process.env.CHROMIUM_PATH || (fs.existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined);
-  const browser = await playwright.chromium.launch({ executablePath: exe, args: ['--no-sandbox', '--autoplay-policy=no-user-gesture-required'] });
-  const page = await browser.newPage();
+  let browser, page;
+  if (process.env.ELECTRON_PATH) {
+    const main = path.join(os.tmpdir(), `filelens_electron_main_${process.pid}.js`);
+    fs.writeFileSync(main, "const { app, BrowserWindow } = require('electron'); app.commandLine.appendSwitch('no-sandbox'); app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required'); app.whenReady().then(() => new BrowserWindow({ show: false }).loadURL('about:blank'));");
+    browser = await playwright._electron.launch({ executablePath: process.env.ELECTRON_PATH, args: ['--no-sandbox', main] });
+    page = await browser.firstWindow();
+  } else {
+    const exe = process.env.CHROMIUM_PATH || (fs.existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined);
+    browser = await playwright.chromium.launch({ executablePath: exe, args: ['--no-sandbox', '--autoplay-policy=no-user-gesture-required'] });
+    page = await browser.newPage();
+  }
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
 
@@ -48,7 +63,7 @@ const clock = (txt) => { const m = txt.trim().split(':').map(Number); return m.l
     const e = window.__audioEngine;
     return { cur: document.getElementById('currentTimeDisplay').textContent, dur: document.getElementById('durationDisplay').textContent,
       slider: parseFloat(document.getElementById('timelineScrubber').value), playing: e.isPlaying, start: e.excerptStart, len: e.originalBuffer.duration,
-      mode: e.playbackMode, paused: !e.isPlaying };
+      mode: e.playbackMode, paused: !e.isPlaying, rate: e.audioContext.sampleRate };
   });
   // The pitch of the audio at the player's current position, from the samples that are actually loaded
   const pitchHere = () => page.evaluate(() => {
@@ -73,6 +88,7 @@ const clock = (txt) => { const m = txt.trim().split(':').map(Number); return m.l
   let s = await state();
   check(`Clock covers the whole recording (${s.dur})`, clock(s.dur) === MIN * 60);
   check('Only a part is loaded at a time (3-minute window)', near(s.len, 180, 1));
+  check(`Decoded at the file's own sample rate (${s.rate} Hz, file is ${SR} Hz)`, s.rate === SR);
   check('Long-recording bar is shown', await page.isVisible('#excerptBar'));
 
   // play / pause
@@ -90,7 +106,7 @@ const clock = (txt) => { const m = txt.trim().split(':').map(Number); return m.l
   await page.click('#btnPlayPause'); await page.waitForTimeout(500);
   const before = clock((await state()).cur); await page.click('#btnForward'); await page.waitForTimeout(400);
   const after = clock((await state()).cur);
-  check(`+10 s button (${before} → ${after})`, near(after - before, 10.4, 1.5));
+  check(`+10 s button (${before} → ${after})`, near(after - before, 10.4, 3));   // wider: audio output can take a moment to start
   await page.keyboard.press('ArrowLeft'); await page.waitForTimeout(300);
   const back = clock((await state()).cur);
   check(`Left arrow goes back 5 s (${after} → ${back})`, near(after - back, 5 - 0.7, 1.5));
@@ -140,6 +156,6 @@ const clock = (txt) => { const m = txt.trim().split(':').map(Number); return m.l
   check('…and closes again', (await page.evaluate(() => document.getElementById('originalPlayerWrap').style.display)) === 'none');
 
   check(`No page errors (${errors.length})`, errors.length === 0, errors.slice(0, 3).join(' | '));
-  await browser.close(); server.close(); fs.unlinkSync(wav);
+  await (browser.close ? browser.close() : browser.close()); server.close(); fs.unlinkSync(wav);
   process.exit(failed ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(2); });

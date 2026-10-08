@@ -283,7 +283,11 @@ document.addEventListener('DOMContentLoaded', () => {
         setStudioBusy(false);
         setStudioAvailable(false, 'Your browser could not read audio from this file.');
         setWorkspaceView('metadata');
-        showAudioNotice({ reason: 'Your browser could not read audio from this file (the format may not be supported, or the file has no sound). Try converting it to MP3, WAV or M4A.' });
+        const aud = (ffprobeData && ffprobeData.streams || []).find(st => st.codec_type === 'audio');
+        const codec = aud && String(aud.codec_name || '').toLowerCase();
+        showAudioNotice({ reason: /^(aac|alac)/.test(codec)
+          ? `Your browser cannot decode ${codec.toUpperCase()} audio (the ${codec === 'aac' ? 'm4a / AAC' : 'ALAC'} format). Chrome, Edge and Safari can; some Linux browsers cannot. Open the file in one of those, or convert it to MP3 or WAV.`
+          : 'Your browser could not read audio from this file (the format may not be supported, or the file has no sound). Try converting it to MP3, WAV or M4A.' });
         showToast('⚠️ Audio cleaning could not open this file. The file details are still available below.', 'warning', 6000);
       }
     })();
