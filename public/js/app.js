@@ -126,7 +126,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const total = audioEngine.fullBuffer.duration, start = audioEngine.excerptStart, len = audioEngine.originalBuffer.duration;
     document.getElementById('excerptText').innerHTML =
       `<strong>Long recording (${fmtClock(total)}).</strong> You are previewing ${fmtClock(start)}–${fmtClock(start + len)}. ` +
-      `Whatever you set here is applied to the <strong>whole recording</strong> when you download.`;
+      `Playback continues into the next part automatically. Whatever you set here is applied to the <strong>whole recording</strong> when you download.`;
     document.getElementById('excerptStart').value = fmtClock(start);
     bar.style.display = 'flex';
   }
@@ -2561,7 +2561,19 @@ document.addEventListener('DOMContentLoaded', () => {
     animationFrameId = requestAnimationFrame(tick);
   }
 
-  audioEngine.onPlaybackEnd = () => {
+  audioEngine.onPlaybackEnd = async () => {
+    // Long recording: when the previewed part ends, load the next part and keep playing,
+    // so the whole recording can be listened to from start to finish.
+    const full = audioEngine.fullBuffer;
+    if (audioEngine.isExcerpt && full && !audioEngine.isLooping) {
+      const nextStart = audioEngine.excerptStart + audioEngine.originalBuffer.duration;
+      if (nextStart < full.duration - 0.5) {
+        showToast('Loading the next part of the recording…', 'info', 2500);
+        await previewFrom(nextStart);
+        if (studioState === 'ready') togglePlayPause();
+        return;
+      }
+    }
     stopPlayback();
   };
 
