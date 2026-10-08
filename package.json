@@ -1,0 +1,13 @@
+{
+  "name": "filelens",
+  "version": "1.0.0",
+  "description": "See where any file really came from: metadata, device, AI origin, Content Credentials (C2PA) verification and audio cleaning. Runs entirely in your browser.",
+  "private": true,
+  "scripts": {
+    "start": "python3 server.py 8000",
+    "test": "for t in tests/test_*.js; do node \"$t\" > /dev/null || exit 1; done && echo 'all tests passed'"
+  },
+  "keywords": ["metadata", "exif", "c2pa", "content-credentials", "ai-detection", "provenance", "forensics", "audio-cleaner", "web-audio-api"],
+  "author": "codewithowais",
+  "license": "MIT"
+}

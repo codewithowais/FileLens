@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SpectraClean AI - Web Audio & Video Restoration Suite</title>
+  <link rel="stylesheet" href="css/style.css?v=3.20">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎛️</text></svg>">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+  <!-- Top Navigation Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="logo-badge">
+        <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 2v20M17 5v14M7 9v6M22 10v4M2 11v2"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1>SpectraClean <span class="ai-pill">AI</span></h1>
+        <p class="tagline">File metadata inspector &amp; audio cleaner</p>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <!-- Theme Switcher -->
+      <div class="theme-selector-wrap" id="themeSelectorWrap">
+        <button type="button" class="btn-theme-toggle" id="btnThemeToggle" title="Change Visual Color Theme">
+          <span class="theme-icon" id="currentThemeIcon">🌙</span>
+          <span class="theme-name" id="currentThemeName">Dark</span>
+          <span class="chevron">▾</span>
+        </button>
+        <div class="theme-dropdown" id="themeDropdown" style="display: none;">
+          <button type="button" class="theme-opt active" data-theme="dark">
+            <span class="opt-icon">🌙</span> Dark Studio
+          </button>
+          <button type="button" class="theme-opt" data-theme="light">
+            <span class="opt-icon">☀️</span> Light Studio
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- 1. Upload Dropzone -->
+    <section id="uploadSection" class="card dropzone-card">
+      <div class="dropzone" id="dropzone">
+        <input type="file" id="fileInput" accept="*/*" class="file-input">
+        <div class="dropzone-content">
+          <div class="drop-icon-wrapper">
+            <svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+          </div>
+          <h3>Drag & Drop, Browse, or Paste Any File</h3>
+          <p class="dropzone-desc">Supports <strong>All Audio & Video (MP4, MOV, WAV, MP3, FLAC, WebM), Images (PNG, JPG, WebP), PDFs, & Any File</strong> • Drag & drop or press <kbd class="kbd-badge">Cmd+V</kbd> / <kbd class="kbd-badge">Ctrl+V</kbd> to paste</p>
+          <div class="dropzone-buttons">
+            <button type="button" class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+              Browse Local Files
+            </button>
+            <button type="button" id="btnPasteClipboard" class="btn btn-clipboard">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+                <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
+              </svg>
+              Paste from Clipboard
+            </button>
+            <button type="button" id="btnQuickDemoWav" class="btn btn-outline">
+              ⚡ Try Audio Demo (WAV)
+            </button>
+            <button type="button" id="btnQuickDemoMp4" class="btn btn-outline btn-outline-cyan">
+              🎬 Try Video Demo (MP4)
+            </button>
+          </div>
+        </div>
+      </div>
+      <div id="toastNotification" class="toast-notification" style="display: none;"></div>
+
+      <!-- Processing Progress Overlay -->
+      <div id="progressOverlay" class="progress-overlay" style="display: none;">
+        <button type="button" id="btnOverlayClose" class="overlay-close-btn" title="Cancel and close" aria-label="Cancel">✕</button>
+        <div class="spinner"></div>
+        <h4 id="progressStatus">Analyzing audio spectrum...</h4>
+        <div class="progress-bar-container">
+          <div id="progressBar" class="progress-bar" style="width: 0%;"></div>
+        </div>
+        <div class="progress-details">
+          <p id="progressPercent" class="progress-percent">0%</p>
+          <p id="progressSubstatus" class="progress-substatus">Decomposing 9 AI audio layers...</p>
+        </div>
+        <div class="progress-actions">
+          <button type="button" id="btnCancelProgress" class="btn btn-cancel-progress">
+            <span class="cancel-icon">✕</span> Cancel Processing
+          </button>
+        </div>
+        <div id="progressWatchdogNotice" class="progress-watchdog-notice" style="display: none;">
+          <span>Taking longer than expected? Click <strong>Cancel</strong> to reset or choose another file.</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Compact file bar (shown instead of the big dropzone once a file is loaded) -->
+    <div id="fileBar" class="file-bar" style="display: none;">
+      <div class="file-bar-icon" id="fileBarIcon">📄</div>
+      <div class="file-bar-info">
+        <div class="file-bar-name" id="fileBarName">file</div>
+        <div class="file-bar-meta" id="fileBarMeta"></div>
+      </div>
+      <button type="button" id="btnOpenAnother" class="btn btn-primary">Open another file</button>
+    </div>
+
+    <!-- App Content (Hidden until file is loaded) -->
+    <div id="workspace" style="display: none;">
+
+      <!-- Workspace tabs: File Metadata (default) | Audio Cleaning Studio -->
+      <div class="workspace-nav-bar" id="workspaceNavBar" role="tablist">
+        <button class="workspace-nav-btn active" id="btnModeMetadata" data-wview="metadata" role="tab">
+          <span class="nav-icon">🔍</span>
+          <span class="nav-text"><strong>File Metadata</strong><small>Specs, tags, tamper check, forensics</small></span>
+        </button>
+        <button class="workspace-nav-btn" id="btnModeStudio" data-wview="studio" role="tab">
+          <span class="nav-icon">🎛️</span>
+          <span class="nav-text"><strong>Audio Cleaning</strong><small>Remove noise, boost voice, export</small></span>
+        </button>
+      </div>
+
+      <!-- Audio Processing & Cleaning Studio (Active for Audio/Video Files) -->
+      <div id="audioProcessingSection">
+        <div id="studioLoading" class="studio-loading" style="display: none;">
+          <div class="spinner"></div>
+          <h4>Getting your audio ready…</h4>
+          <div class="progress-bar-container"><div id="studioLoadingBar" class="progress-bar" style="width: 0%;"></div></div>
+          <p id="studioLoadingText" class="studio-loading-text"></p>
+          <p class="studio-loading-hint">This happens on your device, nothing is uploaded. It takes about 6 seconds per minute of audio.</p>
+        </div>
+        <!-- Studio Quick Actions & Workflow Complexity Bar -->
+        <p class="studio-howto"><strong>How it works:</strong> press <strong>Clean my audio</strong>, then play the file and switch between <strong>Before</strong> and <strong>After</strong> to hear the difference. When you like it, scroll down to download.</p>
+        <div class="studio-quick-bar">
+          <div class="quick-bar-left">
+            <button type="button" class="btn-auto-clean" id="btnAutoClean" title="Instantly apply optimal voice preservation and noise suppression">
+              <span class="sparkle-icon">✨</span>
+              <span class="auto-clean-title">Clean my audio</span>
+              <span class="auto-clean-pill">Recommended</span>
+            </button>
+            <div class="workflow-view-toggle">
+              <button type="button" class="btn-wf-toggle active" id="btnWfQuick" data-wf="quick" title="Simple Easy Mode with Master Sliders">
+                <span>⚡</span> Simple
+              </button>
+              <button type="button" class="btn-wf-toggle" id="btnWfPro" data-wf="pro" title="Full 9-Stem Console & Advanced DSP Rack">
+                <span>🎛️</span> Advanced
+              </button>
+            </div>
+          </div>
+          <div class="quick-bar-right">
+            <div class="algo-selector-wrap">
+              <label for="selCleanAlgorithm" class="algo-label">🧠 AI Profile:</label>
+              <select id="selCleanAlgorithm" class="select-algo">
+                <option value="neural_wiener" selected>✨ Neural-Wiener (Smoothest, Zero Artifacts)</option>
+                <option value="harmonic_voice">🎙️ Harmonic Voice Extractor (Max Clarity)</option>
+                <option value="gentle_ambient">🌿 Gentle & Transparent (Subtle)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. Visualizer & Transport Section (Waveform, Spectrogram, Video & A/B) -->
+        <section class="card visualizer-card">
+        <div class="visualizer-header">
+          <div class="viz-tabs">
+            <button class="viz-tab active" data-view="both">Dual View (Waveform & Spectrogram)</button>
+            <button class="viz-tab" data-view="waveform">Waveform Only</button>
+            <button class="viz-tab" data-view="spectrogram">Spectrogram Only</button>
+          </div>
+
+          <!-- Spectrogram Comparison Mode Switcher -->
+          <div class="spec-mode-group">
+            <span class="spec-mode-label">Spectrogram:</span>
+            <div class="spec-mode-buttons">
+              <button class="btn-spec-mode active" data-mode="cleaned" title="View final cleaned spectrum with current slider changes">
+                <span class="mode-dot green"></span> Final Cleaned
+              </button>
+              <button class="btn-spec-mode" data-mode="split" title="Side-by-side comparison (Before vs After)">
+                <span>⚡</span> Split Compare
+              </button>
+              <button class="btn-spec-mode" data-mode="original" title="View raw untouched original spectrum">
+                <span class="mode-dot red"></span> Original
+              </button>
+              <button class="btn-spec-mode" data-mode="delta" title="View removed noise frequencies">
+                <span>📉</span> Removed Noise
+              </button>
+            </div>
+          </div>
+
+          <div class="ab-switcher">
+            <span class="ab-label">Listen to:</span>
+            <div class="ab-toggle-group">
+              <button id="btnAbOriginal" class="btn-ab">Before</button>
+              <button id="btnAbCleaned" class="btn-ab active">After (cleaned)</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="visualizer-body">
+          <!-- Video Preview Panel (shown if MP4) -->
+          <div id="videoContainer" class="video-preview-wrapper" style="display: none;">
+            <video id="previewVideo" playsinline muted></video>
+            <div class="video-badge">Synced Video Stream</div>
+          </div>
+
+          <!-- Canvas Visualizers Container -->
+          <div class="canvases-container">
+            <!-- Waveform Canvas -->
+            <div id="waveformWrapper" class="canvas-wrapper">
+              <div class="canvas-label">
+                <span>Waveform</span>
+                <span class="legend">
+                  <span class="legend-dot original"></span> Original Raw (Reference)
+                  <span class="legend-dot processed"></span> Final Cleaned (Live Result)
+                </span>
+              </div>
+              <canvas id="waveformCanvas" width="1200" height="120"></canvas>
+            </div>
+
+            <!-- Spectrogram Canvas -->
+            <div id="spectrogramWrapper" class="canvas-wrapper">
+              <div class="canvas-label">
+                <span id="specCanvasLabel">STFT Frequency Spectrogram (20 Hz - 22 kHz) — Final Cleaned</span>
+                <span class="spec-legend">Magma / Inferno dB Heatmap</span>
+              </div>
+              <canvas id="spectrogramCanvas" width="1200" height="200"></canvas>
+              <div id="canvasTooltip" class="canvas-tooltip"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Master Transport Controls -->
+        <div class="transport-bar">
+          <div class="transport-controls">
+            <button id="btnPlayPause" class="btn-transport btn-play" title="Play / Pause (Space)">
+              <svg class="play-icon" viewBox="0 0 24 24" fill="currentColor">
+                <polygon points="5 3 19 12 5 21 5 3"/>
+              </svg>
+              <svg class="pause-icon" viewBox="0 0 24 24" fill="currentColor" style="display: none;">
+                <rect x="6" y="4" width="4" height="16"/>
+                <rect x="14" y="4" width="4" height="16"/>
+              </svg>
+            </button>
+            <button id="btnStop" class="btn-transport" title="Stop">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <rect x="5" y="5" width="14" height="14"/>
+              </svg>
+            </button>
+            <button id="btnLoop" class="btn-transport btn-toggle" title="Loop Playback">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="17 1 21 5 17 9"/>
+                <path d="M3 11V9a4 4 0 0 1 4-4h14"/>
+                <polyline points="7 23 3 19 7 15"/>
+                <path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+              </svg>
+            </button>
+          </div>
+
+          <!-- Timecode Display -->
+          <div class="timecode-display">
+            <span id="currentTimeDisplay" class="time-current">00:00.000</span>
+            <span class="time-sep">/</span>
+            <span id="durationDisplay" class="time-total">00:00.000</span>
+          </div>
+
+          <!-- Timeline Scrubber -->
+          <div class="scrubber-container">
+            <input type="range" id="timelineScrubber" min="0" max="100" value="0" step="0.01" class="scrubber-slider">
+          </div>
+        </div>
+      </section>
+
+      <!-- Real-Time Final Mix & Impact Dashboard -->
+      <section class="card final-status-card" id="finalStatusCard">
+        <div class="final-status-header">
+          <div class="final-status-title-group">
+            <span class="live-dot" id="liveDot"></span>
+            <h3>Active Final Audio State (Live Result)</h3>
+          </div>
+          <div class="final-mode-badge" id="finalModeBadge">
+            🟢 Playing: FINAL CLEANED AUDIO
+          </div>
+        </div>
+
+        <div class="final-status-body">
+          <!-- Real-Time Output VU Level Meter -->
+          <div class="vu-meter-box">
+            <div class="vu-header">
+              <span class="vu-title">Live Master Output Peak Level</span>
+              <span id="vuDbReadout" class="vu-db-readout">-INF dB</span>
+            </div>
+            <div class="vu-meter-track">
+              <div id="vuMeterBar" class="vu-meter-bar" style="width: 0%;"></div>
+            </div>
+            <div class="vu-meter-scale">
+              <span>-60 dB</span>
+              <span>-36 dB</span>
+              <span>-24 dB</span>
+              <span>-12 dB</span>
+              <span>-6 dB</span>
+              <span style="color: #f43f5e;">0 dB</span>
+            </div>
+          </div>
+
+          <!-- Active Changes Breakdown Chips -->
+          <div class="final-summary-chips" id="finalSummaryChips">
+            <!-- Dynamically populated with active modifications -->
+          </div>
+
+          <!-- High-Level Impact Metrics -->
+          <div class="final-impact-metrics">
+            <div class="impact-metric-pill">
+              <span class="impact-label">Estimated Noise Attenuation:</span>
+              <span class="impact-value" id="valNoiseReductionEstimate">-24.5 dB (94% cut)</span>
+            </div>
+            <div class="impact-metric-pill pill-cyan">
+              <span class="impact-label">Background Human Voices:</span>
+              <span class="impact-value" id="valBgVoiceStatus">100% PRESERVED ✅</span>
+            </div>
+            <div class="impact-metric-pill pill-emerald">
+              <span class="impact-label">Speech Clarity Gain:</span>
+              <span class="impact-value" id="valSpeechClarityGain">+2.0 dB Boost</span>
+            </div>
+          </div>
+
+          <!-- Live Voice Dynamic Monitor HUD -->
+          <div class="live-voice-monitor" id="liveVoiceMonitor">
+            <div class="lvm-header">
+              <div class="lvm-title-wrap">
+                <span class="lvm-pulse-dot"></span>
+                <span class="lvm-title">LIVE VOICE ISOLATION & CLARITY MONITOR</span>
+                <span class="lvm-badge" id="lvmStatusBadge">Active Speech: Clean & Boosted</span>
+              </div>
+              <div class="lvm-freq-tag">
+                <span class="lvm-tag-icon">🎙️</span> Speech Band: <strong>300 Hz – 3,400 Hz</strong>
+              </div>
+            </div>
+
+            <div class="lvm-grid">
+              <!-- Voice 1: Main Speaker -->
+              <div class="lvm-col">
+                <div class="lvm-col-top">
+                  <span class="lvm-col-label">🎙️ Main Voice</span>
+                  <span id="lvmMainDb" class="lvm-col-val val-emerald">+2.0 dB</span>
+                </div>
+                <div class="lvm-bar-track">
+                  <div id="lvmMainBar" class="lvm-bar bar-emerald" style="width: 58%;"></div>
+                </div>
+                <div class="lvm-col-sub" id="lvmMainSub">Formants Boosted (+26% clarity)</div>
+              </div>
+
+              <!-- Voice 2: Background Human Voices -->
+              <div class="lvm-col">
+                <div class="lvm-col-top">
+                  <span class="lvm-col-label">👥 Background Voices</span>
+                  <span id="lvmBgDb" class="lvm-col-val val-cyan">0.0 dB (100%)</span>
+                </div>
+                <div class="lvm-bar-track">
+                  <div id="lvmBgBar" class="lvm-bar bar-cyan" style="width: 100%;"></div>
+                </div>
+                <div class="lvm-col-sub" id="lvmBgSub">100% Preserved (Unchanged) ✅</div>
+              </div>
+
+              <!-- Voice 3: Voice-to-Noise Contrast -->
+              <div class="lvm-col">
+                <div class="lvm-col-top">
+                  <span class="lvm-col-label">⚡ Voice vs Noise Delta</span>
+                  <span id="lvmSnrDb" class="lvm-col-val val-amber">+36.5 dB</span>
+                </div>
+                <div class="lvm-bar-track">
+                  <div id="lvmSnrBar" class="lvm-bar bar-amber" style="width: 82%;"></div>
+                </div>
+                <div class="lvm-col-sub" id="lvmSnrSub">Traffic & Fan Suppressed</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 4. AI-Estimated Components Isolation Mixer (9 Stems) -->
+      <section class="card mixer-card">
+        <div class="card-header">
+          <div class="card-title">
+            <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="4" y1="21" x2="4" y2="14"/>
+              <line x1="4" y1="10" x2="4" y2="3"/>
+              <line x1="12" y1="21" x2="12" y2="12"/>
+              <line x1="12" y1="8" x2="12" y2="3"/>
+              <line x1="20" y1="21" x2="20" y2="16"/>
+              <line x1="20" y1="12" x2="20" y2="3"/>
+              <line x1="1" y1="14" x2="7" y2="14"/>
+              <line x1="9" y1="8" x2="15" y2="8"/>
+              <line x1="17" y1="16" x2="23" y2="16"/>
+            </svg>
+            <h2>AI-Estimated Components Mixer Console</h2>
+          </div>
+        </div>
+
+        <!-- Callout Banner Explaining AI-Estimated Layers -->
+        <div class="callout-box">
+          <div class="callout-icon">💡</div>
+          <div class="callout-text">
+            <strong>AI-Estimated Components:</strong> Standard media files contain mixed audio without separate editable tracks. Our neural spectral decomposition models estimate these 9 acoustic components, giving you surgical volume sliders, mute, and solo controls over each element.
+          </div>
+        </div>
+
+        <!-- Presets Bar -->
+        <div class="presets-bar">
+          <span class="preset-label">Quick Scenarios:</span>
+          <div class="preset-buttons">
+            <button class="btn btn-preset active-preset" data-preset="cafe_preserve_voices">
+              ⭐ Keep Main + Background People (Kill Traffic & Fan)
+            </button>
+            <button class="btn btn-preset" data-preset="voice_only">
+              🎙️ Vocal Isolation (Solo Main Speaker)
+            </button>
+            <button class="btn btn-preset" data-preset="remove_traffic_wind">
+              🚗 Outdoor Cleanup (Kill Traffic & Wind)
+            </button>
+            <button class="btn btn-preset" data-preset="remove_fan_hum">
+              ❄️ Indoor Studio (Kill Fan & 60Hz Hum)
+            </button>
+            <button class="btn btn-preset" data-preset="dry_voice">
+              🏛️ Dry Vocal (De-reverb)
+            </button>
+            <button class="btn btn-preset btn-preset-reset" data-preset="reset_unity">
+              🔄 Reset to Unity (0 dB)
+            </button>
+          </div>
+        </div>
+
+        <!-- 9 Component Strips Container -->
+        <div class="mixer-strips-grid" id="mixerGrid">
+          <!-- Dynamically populated with 9 stems -->
+        </div>
+      </section>
+
+      <!-- 5. Simple Macro Controls & Studio Mastering Chain -->
+      <section class="card macro-card">
+        <div class="card-header">
+          <div class="card-title">
+            <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+            </svg>
+            <h2>Fine-tune</h2>
+          </div>
+        </div>
+
+        <div class="macro-grid">
+          <!-- Macro 1: Noise Reduction -->
+          <div class="macro-box">
+            <div class="macro-header">
+              <span class="macro-title">Remove background noise</span>
+              <span id="lblNoiseReduction" class="macro-val">0%</span>
+            </div>
+            <input type="range" id="slNoiseReduction" min="0" max="100" value="0" class="styled-slider">
+            <p class="macro-hint">Attenuates stationary noise, traffic rumble, fan whine, and hum</p>
+          </div>
+
+          <!-- Macro 2: Voice Boost -->
+          <div class="macro-box">
+            <div class="macro-header">
+              <span class="macro-title">Make voices clearer</span>
+              <span id="lblVoiceBoost" class="macro-val">0%</span>
+            </div>
+            <input type="range" id="slVoiceBoost" min="0" max="100" value="0" class="styled-slider">
+            <p class="macro-hint">Enhances vocal formant clarity (1.5kHz - 3.5kHz) and presence</p>
+          </div>
+
+          <!-- Macro 3: Background Voice Preservation (Crucial!) -->
+          <div class="macro-box highlight-box">
+            <div class="macro-header">
+              <span class="macro-title">Keep people talking in the background</span>
+              <span id="lblBgPreserve" class="macro-val">100%</span>
+            </div>
+            <input type="range" id="slBgPreserve" min="0" max="100" value="100" class="styled-slider slider-cyan">
+            <p class="macro-hint">Guarantees ambient human chatter is protected and NOT stripped as noise</p>
+          </div>
+
+          <!-- Macro 4: Master Volume -->
+          <div class="macro-box">
+            <div class="macro-header">
+              <span class="macro-title">Overall volume</span>
+              <span id="lblMasterVol" class="macro-val">0.0 dB</span>
+            </div>
+            <input type="range" id="slMasterVol" min="-24" max="12" value="0" step="0.5" class="styled-slider">
+            <p class="macro-hint">Overall master output volume level</p>
+          </div>
+        </div>
+
+        <!-- 3-Band Parametric EQ & Dynamics -->
+        <div class="dsp-chain-row">
+          <!-- 3-Band EQ -->
+          <div class="dsp-subcard">
+            <h4>Studio 3-Band EQ</h4>
+            <div class="eq-controls">
+              <div class="eq-band">
+                <label>Low (120 Hz)</label>
+                <input type="range" id="eqLow" min="-12" max="12" value="0" step="0.5" class="styled-slider">
+                <span id="lblEqLow">0 dB</span>
+              </div>
+              <div class="eq-band">
+                <label>Mid (2.5 kHz)</label>
+                <input type="range" id="eqMid" min="-12" max="12" value="0" step="0.5" class="styled-slider">
+                <span id="lblEqMid">0 dB</span>
+              </div>
+              <div class="eq-band">
+                <label>High (8.0 kHz)</label>
+                <input type="range" id="eqHigh" min="-12" max="12" value="0" step="0.5" class="styled-slider">
+                <span id="lblEqHigh">0 dB</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Dynamics Compressor & Limiter -->
+          <div class="dsp-subcard">
+            <h4>Dynamics Compressor & Peak Limiter</h4>
+            <div class="dynamics-controls">
+              <div class="dyn-field">
+                <label>Threshold</label>
+                <input type="range" id="compThreshold" min="-40" max="0" value="-24" step="1" class="styled-slider">
+                <span id="lblCompThreshold">-24 dB</span>
+              </div>
+              <div class="dyn-field">
+                <label>Ratio</label>
+                <input type="range" id="compRatio" min="1" max="12" value="3" step="0.5" class="styled-slider">
+                <span id="lblCompRatio">3.0:1</span>
+              </div>
+              <div class="limiter-badge">
+                <span class="led-light active"></span>
+                <span>Peak limiter on: boosting volume will not distort</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Pro Audio Enhancements & Surgical Noise Rack -->
+      <section class="card dsp-enhancement-card" id="dspEnhancementCard">
+        <div class="card-header">
+          <div class="card-title">
+            <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 2v20M17 5v14M7 9v6M22 10v4M2 11v2"/>
+            </svg>
+            <h2>Pro Audio Enhancements & Surgical Restoration Rack</h2>
+          </div>
+          <div class="dsp-live-badge">🟢 Real-Time Active</div>
+        </div>
+
+        <div class="enhancements-grid">
+          <!-- 1. De-Reverb (Room Echo Suppression) -->
+          <div class="enhancement-box">
+            <div class="enhancement-header">
+              <span class="enhancement-title">🏛️ De-Reverb (Room Echo Tamer)</span>
+              <span id="lblDeReverb" class="enhancement-val">0%</span>
+            </div>
+            <input type="range" id="slDeReverb" min="0" max="100" value="0" class="styled-slider">
+            <p class="enhancement-hint">Dries up room reflections, echoey acoustics, and hollow reverb tails</p>
+          </div>
+
+          <!-- 2. De-Esser (Sibilance Control) -->
+          <div class="enhancement-box">
+            <div class="enhancement-header">
+              <span class="enhancement-title">🎙️ De-Esser (Sibilance Control)</span>
+              <span id="lblDeEsser" class="enhancement-val">0%</span>
+            </div>
+            <input type="range" id="slDeEsser" min="0" max="100" value="0" class="styled-slider">
+            <p class="enhancement-hint">Tames harsh 's', 'sh', and piercing mic sibilance frequencies (6.8 kHz)</p>
+          </div>
+
+          <!-- 3. Electrical De-Hum Notch -->
+          <div class="enhancement-box">
+            <div class="enhancement-header">
+              <span class="enhancement-title">⚡ Electrical De-Hum Notch</span>
+              <span id="lblDeHum" class="enhancement-val">Off</span>
+            </div>
+            <div class="btn-group-segmented" id="groupDeHum">
+              <button type="button" class="btn-segmented active" data-dehum="off">Off</button>
+              <button type="button" class="btn-segmented" data-dehum="50hz">50 Hz (EU/UK/Asia)</button>
+              <button type="button" class="btn-segmented" data-dehum="60hz">60 Hz (US/Americas)</button>
+            </div>
+            <p class="enhancement-hint">High-Q surgical notch filter removing 50/60 Hz electrical mains hum</p>
+          </div>
+
+          <!-- 4. Sub-Bass Rumble Cut (High-Pass) -->
+          <div class="enhancement-box">
+            <div class="enhancement-header">
+              <span class="enhancement-title">🌊 Sub-Bass Rumble Cut (High-Pass)</span>
+              <span id="lblHighPass" class="enhancement-val">20 Hz (Off)</span>
+            </div>
+            <div class="btn-group-segmented" id="groupHighPass">
+              <button type="button" class="btn-segmented active" data-hp="20">Off (20 Hz)</button>
+              <button type="button" class="btn-segmented" data-hp="40">40 Hz (Standard)</button>
+              <button type="button" class="btn-segmented" data-hp="80">80 Hz (Vocal Clean)</button>
+              <button type="button" class="btn-segmented" data-hp="120">120 Hz (Heavy Rumble)</button>
+            </div>
+            <p class="enhancement-hint">Eliminates mechanical vibrations, microphone thumps, and handling noise</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 6. Export Center -->
+      <section class="card export-card">
+        <div class="card-header">
+          <div class="card-title">
+            <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            <h2>Download your cleaned file</h2>
+          </div>
+        </div>
+
+        <div class="export-options-grid">
+          <!-- Option A: Clean Audio -->
+          <div class="export-option-box">
+            <div class="export-badge-tag">High Fidelity Audio</div>
+            <h3>Cleaned audio (WAV file)</h3>
+            <p>Studio-quality uncompressed 16-bit / 44.1-48kHz PCM WAV file with all AI component adjustments applied.</p>
+            <button id="btnExportWav" class="btn btn-primary btn-block">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              Download cleaned audio
+            </button>
+          </div>
+
+          <!-- Option B: Lossless Video Remux -->
+          <div class="export-option-box highlight-export" id="videoExportBox">
+            <div class="export-badge-tag tag-emerald">Lossless Stream Copy</div>
+            <h3>Video with cleaned sound (MP4)</h3>
+            <p>Replaces original audio with the cleaned track while losslessly copying the original video stream. 100% video visual quality preserved without generational degradation.</p>
+            <button id="btnExportMp4" class="btn btn-emerald btn-block">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/>
+                <line x1="7" y1="2" x2="7" y2="22"/>
+                <line x1="17" y1="2" x2="17" y2="22"/>
+                <line x1="2" y1="12" x2="22" y2="12"/>
+                <line x1="2" y1="7" x2="7" y2="7"/>
+                <line x1="2" y1="17" x2="7" y2="17"/>
+                <line x1="17" y1="17" x2="22" y2="17"/>
+                <line x1="17" y1="7" x2="22" y2="7"/>
+              </svg>
+              Download cleaned video
+            </button>
+          </div>
+        </div>
+
+        <!-- Export Progress Indicator -->
+        <div id="exportProgress" class="export-progress-panel" style="display: none;">
+          <div class="spinner-sm"></div>
+          <span id="exportStatusText">Encoding audio master...</span>
+        </div>
+      </section>
+      </div> <!-- /#audioProcessingSection -->
+
+      <!-- Non-Audio File Notice -->
+      <div id="nonAudioNotice" class="non-audio-notice" style="display: none;">
+        <span class="notice-icon">ℹ️</span> This file has no audio track, so Audio Cleaning is switched off. Everything about the file is shown below.
+      </div>
+
+      <!-- Universal FFprobe & File Metadata Inspector Section -->
+      <section id="metadataSection" class="card metadata-card">
+        <div class="card-header">
+          <div class="card-title">
+            <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="16" x2="12" y2="12"/>
+              <line x1="12" y1="8" x2="12.01" y2="8"/>
+            </svg>
+            <h2>File Metadata</h2>
+          </div>
+          <div class="meta-action-buttons">
+            <button id="btnExportMetaJson" class="btn btn-xs btn-outline" title="Download metadata as JSON">📥 Export JSON</button>
+            <button id="btnExportMetaCsv" class="btn btn-xs btn-outline" title="Download metadata as CSV">📊 Export CSV</button>
+            <button id="btnCopyAllMeta" class="btn btn-xs btn-outline" title="Copy metadata to clipboard">📋 Copy All</button>
+          </div>
+        </div>
+
+        <!-- Plain-English summary -->
+        <div class="plain-summary" id="plainSummary"></div>
+
+        <!-- Key facts -->
+        <h3 class="section-subtitle">Key facts</h3>
+        <div class="glance-grid" id="glanceGrid"></div>
+
+      <!-- Prominent Device & Hardware Origin HUD Banner (Always Visible in Studio & Metadata) -->
+      <div class="device-origin-banner" id="deviceOriginBanner" style="display: none;">
+        <div class="device-banner-main">
+          <div class="device-banner-icon-wrap" id="deviceBannerIconWrap">
+            <span class="device-banner-icon" id="deviceBannerIcon">📱</span>
+          </div>
+          <div class="device-banner-content">
+            <div class="device-banner-header-row">
+              <span class="device-banner-label">CREATED WITH / RECORDED ON</span>
+              <span class="device-banner-type-badge" id="deviceBannerBadge">Smartphone Camera</span>
+              <span class="device-banner-status-badge" id="deviceBannerStatus">Hardware Verified</span>
+            </div>
+            <div class="device-banner-title" id="deviceBannerName">Apple iPhone 14 Pro</div>
+            <div class="device-banner-specs-row" id="deviceBannerSpecsRow">
+              <span class="dev-spec-chip" id="chipDeviceNo"><strong>Device No. / Model:</strong> <span id="valDeviceNo">iPhone15,2</span></span>
+              <span class="dev-spec-chip" id="chipSerialNo"><strong>Hardware Serial No:</strong> <span id="valSerialNo">Not Stamped</span></span>
+              <span class="dev-spec-chip" id="chipLens"><strong>Lens / Optics:</strong> <span id="valLens">24mm f/1.78</span></span>
+              <span class="dev-spec-chip" id="chipHost"><strong>Host / OS:</strong> <span id="valHost">Apple iOS</span></span>
+            </div>
+            <p class="device-banner-desc" id="deviceBannerDesc">Recorded natively on hardware sensor.</p>
+          </div>
+        </div>
+      </div>
+
+        <!-- Metadata Search & Category Bar -->
+        <div class="meta-toolbar">
+          <div class="meta-search-box">
+            <span class="search-icon">🔍</span>
+            <input type="text" id="metaSearchInput" placeholder="Search this file's info (e.g. device, date, size, author)…" class="meta-search-input">
+          </div>
+          <div class="meta-category-tabs">
+            <button class="meta-tab active" data-tab="overview">📋 Details</button>
+            <button class="meta-tab" data-tab="ai" id="tabAiBtn">🤖 AI Check</button>
+            <button class="meta-tab" data-tab="tamper">🕵️ Edit History</button>
+            <button class="meta-tab" data-tab="tags">🏷️ Hidden Info</button>
+            <button class="meta-tab meta-tab-adv" data-tab="tree">🌳 File Structure</button>
+            <button class="meta-tab meta-tab-adv" data-tab="forensics">🔐 Forensics</button>
+            <button class="meta-tab meta-tab-adv" data-tab="raw">💻 Raw JSON</button>
+            <button type="button" class="meta-adv-toggle" id="btnAdvToggle">Show advanced ▾</button>
+          </div>
+        </div>
+
+        <!-- Tab 1: Overview & Streams -->
+        <div id="tabContentOverview" class="meta-tab-content active">
+          <div class="metadata-grid" id="metadataGrid">
+            <!-- Populated by JS -->
+          </div>
+        </div>
+
+        <!-- Tab: AI Check -->
+        <div id="tabContentAi" class="meta-tab-content" style="display: none;">
+          <div class="ai-container" id="aiContainer"></div>
+        </div>
+
+        <!-- Tab: Tamper & Modification History -->
+        <div id="tabContentTamper" class="meta-tab-content" style="display: none;">
+          <div class="tamper-container" id="tamperContainer">
+            <!-- Populated by JS -->
+          </div>
+        </div>
+
+        <!-- Tab 2: All Tags & Properties -->
+        <div id="tabContentTags" class="meta-tab-content" style="display: none;">
+          <div class="meta-tags-table-wrapper">
+            <table class="meta-table" id="metaTagsTable">
+              <thead>
+                <tr>
+                  <th style="width: 320px;">Property Tag (Human Name & Technical Key)</th>
+                  <th>Extracted Value</th>
+                </tr>
+              </thead>
+              <tbody id="metaTagsTbody">
+                <!-- Populated by JS -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Tab 3: Container Atom / Chunk Tree -->
+        <div id="tabContentTree" class="meta-tab-content" style="display: none;">
+          <div class="atom-tree-banner">
+            <span class="atom-tree-banner-icon">🧱</span>
+            <div class="atom-tree-banner-text">
+              <strong>Internal File Anatomy & Building Blocks (Atoms / Chunks)</strong>
+              <p>Media files are organized like filing cabinets with labeled drawers. Below is every structural block found inside this file from beginning to end.</p>
+            </div>
+          </div>
+          <div class="atom-tree-wrapper" id="atomTreeWrapper">
+            <!-- Populated by JS -->
+          </div>
+        </div>
+
+        <!-- Tab 4: Forensics & Binary Signatures -->
+        <div id="tabContentForensics" class="meta-tab-content" style="display: none;">
+          <div class="forensics-grid" id="forensicsGrid">
+            <!-- Populated by JS -->
+          </div>
+        </div>
+
+        <!-- Tab 5: Raw JSON -->
+        <div id="tabContentRaw" class="meta-tab-content" style="display: none;">
+          <div class="raw-json-block">
+            <div class="code-header">
+              <span>ffprobe -v quiet -print_format json -show_format -show_streams</span>
+              <button id="btnCopyJson" class="btn btn-xs btn-outline">Copy JSON</button>
+            </div>
+            <pre id="rawJsonText"><code></code></pre>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <footer class="app-footer">
+    <p>SpectraClean • Files are analysed locally in your browser and never uploaded</p>
+  </footer>
+
+  <!-- Scripts -->
+  <script src="js/audio-engine.js?v=3.20"></script>
+  <script src="js/spectrogram.js?v=3.20"></script>
+  <script src="js/metadata-extras.js?v=3.20"></script>
+  <script src="js/c2pa-trust-anchors.js?v=3.20"></script>
+  <script src="js/c2pa-verifier.js?v=3.20"></script>
+  <script src="js/ai-detector.js?v=3.20"></script>
+  <script src="js/ffprobe-parser.js?v=3.20"></script>
+  <script src="js/audio-exporter.js?v=3.20"></script>
+  <script src="js/mp4-muxer.js?v=3.20"></script>
+  <script src="js/app.js?v=3.20"></script>
+</body>
+</html>
