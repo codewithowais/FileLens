@@ -2638,9 +2638,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (audioEngine.isExcerpt && full && !audioEngine.isLooping) {
       const nextStart = audioEngine.excerptStart + audioEngine.originalBuffer.duration;
       if (nextStart < full.duration - 0.5) {
-        showToast('Loading the next part of the recording…', 'info', 2500);
-        await previewFrom(nextStart);
-        if (studioState === 'ready') togglePlayPause();
+        // seekGlobal loads the part and starts exactly at `nextStart`, also when the last part had to be
+        // pulled back to end where the file ends (otherwise the tail of the recording would play twice)
+        await seekGlobal(nextStart, true);
         return;
       }
     }

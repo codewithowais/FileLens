@@ -5,9 +5,20 @@
   "private": true,
   "scripts": {
     "start": "python3 server.py 8000",
-    "test": "for t in tests/test_*.js; do node \"$t\" > /dev/null || exit 1; done && echo 'all tests passed'"
+    "test": "for t in tests/test_*.js; do node \"$t\" > /dev/null || exit 1; done && echo 'all tests passed'",
+    "test:e2e": "node tests/e2e/player.js"
   },
-  "keywords": ["metadata", "exif", "c2pa", "content-credentials", "ai-detection", "provenance", "forensics", "audio-cleaner", "web-audio-api"],
+  "keywords": [
+    "metadata",
+    "exif",
+    "c2pa",
+    "content-credentials",
+    "ai-detection",
+    "provenance",
+    "forensics",
+    "audio-cleaner",
+    "web-audio-api"
+  ],
   "author": "codewithowais",
   "license": "MIT"
 }
