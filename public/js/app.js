@@ -107,6 +107,14 @@ document.addEventListener('DOMContentLoaded', () => {
     return parts.reduce((acc, x) => acc * 60 + parseFloat(x), 0);
   }
 
+  // Shows the preview length, and the full length too when only a part of a long recording is previewed
+  function updateDurationLabel() {
+    if (!durationDisplay) return;
+    const preview = formatTime(audioEngine.getDuration());
+    durationDisplay.textContent = audioEngine.isExcerpt && audioEngine.fullBuffer
+      ? `${preview} preview of ${formatTime(audioEngine.fullBuffer.duration)}` : preview;
+  }
+
   function updateExcerptBar() {
     const bar = document.getElementById('excerptBar');
     const long = audioEngine.isExcerpt && audioEngine.fullBuffer;
@@ -139,7 +147,7 @@ document.addEventListener('DOMContentLoaded', () => {
       visualizer.setAudioBuffers(audioEngine.originalBuffer);
       visualizer.setStems(audioEngine.stems);
       visualizer.updatePlayhead(0);
-      if (durationDisplay) durationDisplay.textContent = formatTime(audioEngine.getDuration());
+      updateDurationLabel();
       syncPresetUi(activePreset ? activePreset.preset : null);
       updateProcessedWaveformPreview();
       updateExcerptBar();
@@ -195,7 +203,7 @@ document.addEventListener('DOMContentLoaded', () => {
         visualizer.setAudioBuffers(audioBuf);
         visualizer.setStems(audioEngine.stems);
         visualizer.updatePlayhead(0);
-        if (durationDisplay) durationDisplay.textContent = formatTime(audioEngine.getDuration());
+        updateDurationLabel();
 
         // Start from the recommended clean so sliders, mixer and sound all agree
         applyAutoCleanUi(false);
