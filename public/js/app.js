@@ -113,7 +113,10 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateDurationLabel() {
     if (durationDisplay) durationDisplay.textContent = formatTime(totalDuration());
   }
+  // While the slider is being dragged the playback loop must not move it back under the user's finger
+  let scrubbing = false, scrubTarget = 0, pendingSeek = null;
   function refreshTransport() {
+    if (scrubbing) return;
     const total = totalDuration(), t = windowOffset() + audioEngine.getCurrentTime();
     if (currentTimeDisplay) currentTimeDisplay.textContent = formatTime(t);
     if (timelineScrubber && total > 0) timelineScrubber.value = (t / total) * 100;
@@ -123,14 +126,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const total = totalDuration();
     if (!(total > 0)) return;
     t = Math.max(0, Math.min(total - 0.05, t));
+    if (studioState === 'loading') { pendingSeek = { t, resume }; return; }   // applied when the loading part is ready
     const off = windowOffset(), len = audioEngine.getDuration();
     if (!audioEngine.isExcerpt || (t >= off && t < off + len - 0.05)) {
       audioEngine.seek(t - off);
     } else {
       showToast('Loading that part of the recording…', 'info', 2500);
       await previewFrom(t);
-      if (studioState !== 'ready') return;
-      audioEngine.seek(Math.max(0, t - windowOffset()));
+      const next = pendingSeek; pendingSeek = null;
+      if (next) return seekGlobal(next.t, next.resume);
+      const o2 = windowOffset();
+      // the part did not load (error / cancelled): do not seek inside the wrong part
+      if (studioState !== 'ready' || t < o2 || t >= o2 + audioEngine.getDuration()) return;
+      audioEngine.seek(Math.max(0, t - o2));
     }
     if (previewVideo && currentFile && currentFile.type.includes('video')) previewVideo.currentTime = t;
     refreshTransport();
@@ -2467,26 +2475,27 @@ document.addEventListener('DOMContentLoaded', () => {
   timelineScrubber.addEventListener('input', (e) => {
     const total = totalDuration();
     if (!(total > 0)) return;
-    const target = (parseFloat(e.target.value) / 100) * total;
-    const off = windowOffset(), len = audioEngine.getDuration();
-    if (currentTimeDisplay) currentTimeDisplay.textContent = formatTime(target);
+    scrubbing = true;
+    scrubTarget = (parseFloat(e.target.value) / 100) * total;
+    if (currentTimeDisplay) currentTimeDisplay.textContent = formatTime(scrubTarget);
     // Inside the loaded part: seek live while dragging. Outside it: wait until the slider is released.
-    if (!audioEngine.isExcerpt || (target >= off && target < off + len - 0.05)) {
+    const off = windowOffset(), len = audioEngine.getDuration();
+    if (!audioEngine.isExcerpt || (scrubTarget >= off && scrubTarget < off + len - 0.05)) {
+      const t = scrubTarget;
       if (!scrubberRaf) {
-        scrubberRaf = requestAnimationFrame(() => {
-          scrubberRaf = null;
-          seekGlobal(target, false);
-        });
+        scrubberRaf = requestAnimationFrame(() => { scrubberRaf = null; audioEngine.seek(t - windowOffset()); });
       }
     }
   });
-  timelineScrubber.addEventListener('change', (e) => {
-    const total = totalDuration();
-    if (!(total > 0) || studioState !== 'ready') return;
-    const target = (parseFloat(e.target.value) / 100) * total;
-    const off = windowOffset(), len = audioEngine.getDuration();
-    if (audioEngine.isExcerpt && (target < off || target >= off + len - 0.05)) seekGlobal(target, audioEngine.isPlaying);
+  // Released: go exactly where the slider was left, loading that part of the recording if needed
+  timelineScrubber.addEventListener('change', () => {
+    if (!scrubbing) return;
+    scrubbing = false;
+    const resume = audioEngine.isPlaying;
+    if (scrubberRaf) { cancelAnimationFrame(scrubberRaf); scrubberRaf = null; }
+    seekGlobal(scrubTarget, resume);
   });
+  timelineScrubber.addEventListener('blur', () => { if (scrubbing) { scrubbing = false; refreshTransport(); } });
 
   // ---- Rewind / fast-forward -------------------------------------------------------------------
   function jumpTo(t) {
