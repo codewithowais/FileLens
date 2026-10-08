@@ -260,6 +260,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const looksMedia = mime.startsWith('audio/') || mime.startsWith('video/') || MEDIA_EXTENSIONS.includes(ext);
     const foundVideoOnly = streams.some(st => st.codec_type === 'video');
+    // A file named/typed as audio (e.g. .m4a) whose only parsed track is "video" is usually cover art
+    // or a track we misread, so let the browser decide whether it can decode sound.
+    const AUDIO_EXTENSIONS = ['mp3', 'wav', 'wave', 'm4a', 'm4b', 'aac', 'flac', 'ogg', 'oga', 'opus', 'wma', 'aif', 'aiff', 'aifc', 'caf', 'amr', 'awb', 'mka', 'weba'];
+    if (foundVideoOnly && (mime.startsWith('audio/') || AUDIO_EXTENSIONS.includes(ext))) return { available: true, unsure: true };
     if (foundVideoOnly) return { available: false, reason: 'FileLens found a video track but no sound track in this file, so there is nothing to clean.' };
     if (looksMedia) return { available: true, unsure: true };
     return { available: false, canTryAnyway: true, reason: 'FileLens could not find audio in this file type. If you think it has sound, you can try anyway.' };
