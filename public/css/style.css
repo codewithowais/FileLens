@@ -2596,3 +2596,6 @@ body { font-size: 14.5px; line-height: 1.5; }
 .cc-checks li b { color: var(--text-main); font-weight: 600; }
 .cc-checks li span { grid-column: 2; color: var(--text-muted); font-size: .8rem; line-height: 1.45; }
 .cc-foot { margin-top: var(--s4); font-size: .76rem; color: var(--text-muted); line-height: 1.5; }
+
+.non-audio-notice .notice-msg { flex: 1; }
+.non-audio-notice .notice-action { flex-shrink: 0; }

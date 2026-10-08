@@ -19,6 +19,85 @@ const yieldToUI = (() => {
   return () => new Promise(r => { waiting.push(r); ch.port2.postMessage(0); });
 })();
 
+/**
+ * Built-in decoders for uncompressed AIFF / AIFF-C and CAF audio, used when the browser cannot
+ * decode them itself (Chrome and Firefox cannot). Returns { sampleRate, channels: Float32Array[] }.
+ */
+class PcmFallback {
+  static decode(arrayBuffer) {
+    const u8 = new Uint8Array(arrayBuffer);
+    const tag = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
+    if (tag === 'FORM') return this.aiff(u8);
+    if (tag === 'caff') return this.caf(u8);
+    return null;
+  }
+
+  static samples(view, offset, frames, channels, bits, littleEndian, isFloat) {
+    const bps = bits / 8, out = Array.from({ length: channels }, () => new Float32Array(frames));
+    for (let f = 0; f < frames; f++) {
+      for (let c = 0; c < channels; c++) {
+        const o = offset + (f * channels + c) * bps;
+        if (o + bps > view.byteLength) return out;
+        let v;
+        if (isFloat) v = bits === 64 ? view.getFloat64(o, littleEndian) : view.getFloat32(o, littleEndian);
+        else if (bits === 8) v = view.getInt8(o) / 128;
+        else if (bits === 16) v = view.getInt16(o, littleEndian) / 32768;
+        else if (bits === 24) {
+          const b0 = view.getUint8(o), b1 = view.getUint8(o + 1), b2 = view.getUint8(o + 2);
+          let n = littleEndian ? (b2 << 16) | (b1 << 8) | b0 : (b0 << 16) | (b1 << 8) | b2;
+          if (n & 0x800000) n -= 0x1000000; v = n / 8388608;
+        } else if (bits === 32) v = view.getInt32(o, littleEndian) / 2147483648;
+        else throw new Error(`${bits}-bit audio is not supported`);
+        out[c][f] = v;
+      }
+    }
+    return out;
+  }
+
+  static aiff(u8) {
+    const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const isC = String.fromCharCode(u8[8], u8[9], u8[10], u8[11]) === 'AIFC';
+    let p = 12, comm = null, ssnd = null;
+    while (p + 8 <= u8.length) {
+      const id = String.fromCharCode(u8[p], u8[p + 1], u8[p + 2], u8[p + 3]); const size = view.getUint32(p + 4);
+      if (id === 'COMM') {
+        const channels = view.getUint16(p + 8), frames = view.getUint32(p + 10), bits = view.getUint16(p + 14);
+        const expo = view.getUint16(p + 16) & 0x7FFF, hi = view.getUint32(p + 18), lo = view.getUint32(p + 22);
+        const sampleRate = Math.round((hi * 4294967296 + lo) * Math.pow(2, expo - 16383 - 63));
+        let comp = 'NONE'; if (isC && size >= 22) comp = String.fromCharCode(u8[p + 26], u8[p + 27], u8[p + 28], u8[p + 29]);
+        comm = { channels, frames, bits, sampleRate, comp };
+      } else if (id === 'SSND') ssnd = { offset: p + 8 + 8 + view.getUint32(p + 8) };
+      p += 8 + size + (size % 2);
+    }
+    if (!comm || !ssnd) throw new Error('not a valid AIFF file');
+    const comp = comm.comp;
+    if (!['NONE', 'sowt', 'fl32', 'fl64', 'FL32', 'FL64', 'twos', 'in24', 'in32'].includes(comp)) throw new Error(`compressed AIFF-C (${comp}) is not supported`);
+    const isFloat = /^fl/i.test(comp); const bits = comp === 'fl32' || comp === 'FL32' ? 32 : comp === 'fl64' || comp === 'FL64' ? 64 : comm.bits;
+    return { sampleRate: comm.sampleRate, channels: this.samples(view, ssnd.offset, comm.frames, comm.channels, bits, comp === 'sowt', isFloat) };
+  }
+
+  static caf(u8) {
+    const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    let p = 8, desc = null, data = null;
+    while (p + 12 <= u8.length) {
+      const id = String.fromCharCode(u8[p], u8[p + 1], u8[p + 2], u8[p + 3]);
+      const size = Number(view.getBigInt64(p + 4)); const body = p + 12;
+      if (id === 'desc') {
+        desc = { sampleRate: view.getFloat64(body), format: String.fromCharCode(u8[body + 8], u8[body + 9], u8[body + 10], u8[body + 11]), flags: view.getUint32(body + 12),
+          bytesPerPacket: view.getUint32(body + 16), channels: view.getUint32(body + 24), bits: view.getUint32(body + 28) };
+      } else if (id === 'data') {
+        const len = size < 0 ? u8.length - body : size; data = { offset: body + 4, length: len - 4 };
+      }
+      if (size < 0) break;
+      p = body + size;
+    }
+    if (!desc || !data) throw new Error('not a valid CAF file');
+    if (desc.format !== 'lpcm') throw new Error(`compressed CAF audio (${desc.format}) is not supported`);
+    const frames = Math.floor(data.length / (desc.channels * desc.bits / 8));
+    return { sampleRate: desc.sampleRate, channels: this.samples(view, data.offset, frames, desc.channels, desc.bits, !!(desc.flags & 2), !!(desc.flags & 1)) };
+  }
+}
+
 class AudioEngine {
   constructor() {
     this.audioContext = null;
@@ -145,6 +224,20 @@ class AudioEngine {
       };
       const onErr = (err) => {
         if (isSettled) return;
+        // The browser could not decode it: try the built-in AIFF / CAF decoder
+        try {
+          const pcm = PcmFallback.decode(arrayBuffer);
+          if (pcm && pcm.channels.length && pcm.channels[0].length) {
+            const buf = this.audioContext.createBuffer(pcm.channels.length, pcm.channels[0].length, pcm.sampleRate);
+            pcm.channels.forEach((ch, i) => buf.copyToChannel(ch, i));
+            isSettled = true;
+            this.originalBuffer = buf;
+            resolve(buf);
+            return;
+          }
+        } catch (fallbackErr) {
+          err = fallbackErr;
+        }
         isSettled = true;
         reject(err || new Error("Failed to decode audio data"));
       };
@@ -1331,4 +1424,5 @@ class FastFFT {
 }
 
 window.AudioEngine = AudioEngine;
+window.PcmFallback = PcmFallback;
 window.FastFFT = FastFFT;

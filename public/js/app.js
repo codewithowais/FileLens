@@ -134,9 +134,10 @@ document.addEventListener('DOMContentLoaded', () => {
         console.warn('Studio preparation failed:', err);
         studioState = 'error';
         setStudioBusy(false);
-        setStudioAvailable(false);
+        setStudioAvailable(false, 'Your browser could not read audio from this file.');
         setWorkspaceView('metadata');
-        showToast(`⚠️ Could not prepare this audio for cleaning (${escapeHtml(err.message || 'unsupported audio')}). The file details are still available.`, 'warning', 6000);
+        showAudioNotice({ reason: 'Your browser could not read audio from this file (the format may not be supported, or the file has no sound). Try converting it to MP3, WAV or M4A.' });
+        showToast('⚠️ Audio cleaning could not open this file. The file details are still available below.', 'warning', 6000);
       }
     })();
     return studioPromise;
@@ -158,10 +159,58 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Studio tab only makes sense for files that contain audio
-  function setStudioAvailable(available) {
+  function setStudioAvailable(available, reason) {
     if (!btnModeStudio) return;
     btnModeStudio.disabled = !available;
-    btnModeStudio.title = available ? '' : 'This file has no audio track to clean';
+    btnModeStudio.title = available ? '' : (reason || 'This file has no audio track to clean');
+  }
+
+  const MEDIA_EXTENSIONS = ['mp3', 'wav', 'wave', 'm4a', 'm4b', 'aac', 'flac', 'ogg', 'oga', 'opus', 'wma', 'aif', 'aiff', 'aifc', 'caf', 'amr', 'awb', 'mka', 'weba',
+    'mp4', 'm4v', 'mov', 'qt', 'webm', 'mkv', 'avi', '3gp', '3g2', 'wmv', 'flv', 'ts', 'mts', 'm2ts', 'mpg', 'mpeg', 'ogv'];
+
+  /**
+   * Decides whether Audio Cleaning can be offered, and tells the user why when it can't.
+   * The browser, not our parser, has the final say on whether audio can be decoded, so a media
+   * file whose tracks we could not read is still allowed to try.
+   */
+  function decideAudioSupport(file, data) {
+    const streams = (data && data.streams) || [];
+    const format = (data && data.format) || {};
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    const mime = (file.type || '').toLowerCase();
+    if (streams.some(st => st.codec_type === 'audio')) return { available: true };
+
+    const isImage = mime.startsWith('image/') || /^(image2|webp|heif|gif|png|tiff)/i.test(format.format_name || '') || ['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif', 'avif', 'tif', 'tiff', 'bmp', 'svg'].includes(ext);
+    if (isImage) return { available: false, reason: 'This is an image, so there is no audio to clean.' };
+    if (isDocumentData(format) || ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp', 'txt', 'rtf', 'zip'].includes(ext)) {
+      return { available: false, reason: 'This is a document, so there is no audio to clean.' };
+    }
+    const looksMedia = mime.startsWith('audio/') || mime.startsWith('video/') || MEDIA_EXTENSIONS.includes(ext);
+    const foundVideoOnly = streams.some(st => st.codec_type === 'video');
+    if (foundVideoOnly) return { available: false, reason: 'FileLens found a video track but no sound track in this file, so there is nothing to clean.' };
+    if (looksMedia) return { available: true, unsure: true };
+    return { available: false, canTryAnyway: true, reason: 'FileLens could not find audio in this file type. If you think it has sound, you can try anyway.' };
+  }
+
+  let lastFileBytes = null;
+
+  function showAudioNotice(decision) {
+    if (!nonAudioNotice) return;
+    nonAudioNotice.innerHTML = `<span class="notice-icon">ℹ️</span><span class="notice-msg"></span>`;
+    nonAudioNotice.querySelector('.notice-msg').textContent = `${decision.reason} Everything else about the file is shown below.`;
+    if (decision.canTryAnyway) {
+      const btn = document.createElement('button');
+      btn.type = 'button'; btn.className = 'btn btn-sm btn-outline notice-action'; btn.textContent = 'Try audio cleaning anyway';
+      btn.addEventListener('click', () => {
+        if (!lastFileBytes) return;
+        pendingAudioBytes = lastFileBytes; studioState = 'idle'; studioPromise = null;
+        setStudioAvailable(true);
+        nonAudioNotice.style.display = 'none';
+        setWorkspaceView('studio');
+      });
+      nonAudioNotice.appendChild(btn);
+    }
+    nonAudioNotice.style.display = 'flex';
   }
 
   // Replace the large dropzone with a compact bar once a file is loaded
@@ -541,9 +590,11 @@ document.addEventListener('DOMContentLoaded', () => {
       if (abortSignal.aborted) return;
       renderMetadata(ffprobeData);
 
-      const hasAudio = ffprobeData && ffprobeData.streams && ffprobeData.streams.some(s => s.codec_type === 'audio');
-      setStudioAvailable(hasAudio);
+      const audioDecision = decideAudioSupport(file, ffprobeData);
+      const hasAudio = audioDecision.available;
+      setStudioAvailable(hasAudio, audioDecision.reason);
       setWorkspaceView('metadata');
+      lastFileBytes = arrayBuffer;
 
       if (hasAudio) {
         // Audio decoding + noise analysis is heavy, so it happens when the cleaning tab is
@@ -554,7 +605,7 @@ document.addEventListener('DOMContentLoaded', () => {
           setTimeout(() => { if (currentFile === file && studioState === 'idle') prepareStudio(); }, 1200);
         }
       } else {
-        if (nonAudioNotice) nonAudioNotice.style.display = 'flex';
+        showAudioNotice(audioDecision);
         if (videoContainer) videoContainer.style.display = 'none';
         showToast(`📁 <strong>${escapeHtml(file.name)}</strong> inspected! Full metadata, tags, and binary forensics extracted.`, 'info', 4000);
       }
