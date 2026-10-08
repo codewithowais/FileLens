@@ -506,5 +506,162 @@ class MetaExtras {
   }
 }
 
+/**
+ * Readers for the technical facts inside audio/video containers (sample rate, channels, duration...).
+ * They report only what the file states; when a value cannot be determined they return undefined.
+ */
+class MediaProbe {
+  // ---------------------------------------------------------------- MP3
+  static mp3Info(u8, start, fileSize) {
+    const BR = {
+      '1-1': [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448], '1-2': [0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],
+      '1-3': [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320], '2-1': [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
+      '2-2': [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160], '2-3': [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160]
+    };
+    const SR = { 3: [44100, 48000, 32000], 2: [22050, 24000, 16000], 0: [11025, 12000, 8000] };
+    const parseAt = (p) => {
+      if (p + 4 > u8.length || u8[p] !== 0xFF || (u8[p + 1] & 0xE0) !== 0xE0) return null;
+      const vBits = (u8[p + 1] >> 3) & 3, lBits = (u8[p + 1] >> 1) & 3, brI = (u8[p + 2] >> 4) & 15, srI = (u8[p + 2] >> 2) & 3, pad = (u8[p + 2] >> 1) & 1, mode = (u8[p + 3] >> 6) & 3;
+      if (vBits === 1 || lBits === 0 || brI === 0 || brI === 15 || srI === 3) return null;
+      const layer = 4 - lBits, mpeg1 = vBits === 3, ver = mpeg1 ? 1 : 2;
+      const bitrate = BR[`${ver}-${layer}`][brI] * 1000, sampleRate = SR[vBits][srI];
+      const spf = layer === 1 ? 384 : (layer === 3 && !mpeg1 ? 576 : 1152);
+      const frameLen = layer === 1 ? (Math.floor(12 * bitrate / sampleRate) + pad) * 4 : Math.floor((spf / 8) * bitrate / sampleRate) + pad;
+      return { layer, mpeg1, vBits, bitrate, sampleRate, channels: mode === 3 ? 1 : 2, spf, frameLen, hasCrc: (u8[p + 1] & 1) === 0 };
+    };
+    let p = start, first = null;
+    for (; p + 4 < Math.min(u8.length, start + 262144); p++) {
+      const h = parseAt(p);
+      if (h && h.frameLen > 0) { const n = parseAt(p + h.frameLen); if (n && n.sampleRate === h.sampleRate && n.layer === h.layer) { first = h; break; } }
+    }
+    if (!first) return null;
+    const out = { sampleRate: first.sampleRate, channels: first.channels, bitrate: first.bitrate, layer: first.layer, mpeg: first.mpeg1 ? '1' : (first.vBits === 0 ? '2.5' : '2'), frameStart: p, vbr: false };
+    const side = first.mpeg1 ? (first.channels === 1 ? 17 : 32) : (first.channels === 1 ? 9 : 17);
+    const x = p + 4 + (first.hasCrc ? 2 : 0) + side;
+    const tag = String.fromCharCode(u8[x] || 0, u8[x + 1] || 0, u8[x + 2] || 0, u8[x + 3] || 0);
+    const be32 = (o) => ((u8[o] * 16777216) + (u8[o + 1] << 16) + (u8[o + 2] << 8) + u8[o + 3]);
+    let frames = null, bytes = null;
+    if (tag === 'Xing' || tag === 'Info') { const fl = be32(x + 4); if (fl & 1) frames = be32(x + 8); if (fl & 2) bytes = be32(x + (fl & 1 ? 12 : 8)); out.vbr = tag === 'Xing'; }
+    else { const v = p + 4 + 32; if (String.fromCharCode(u8[v], u8[v + 1], u8[v + 2], u8[v + 3]) === 'VBRI') { frames = be32(v + 14); bytes = be32(v + 10); out.vbr = true; } }
+    const id3v1 = fileSize >= 128 && String.fromCharCode(u8[fileSize - 128], u8[fileSize - 127], u8[fileSize - 126]) === 'TAG' ? 128 : 0;
+    if (frames) { out.duration = frames * first.spf / first.sampleRate; out.bitrate = Math.round(((bytes || (fileSize - p - id3v1)) * 8) / out.duration); }
+    else out.duration = ((fileSize - p - id3v1) * 8) / first.bitrate;
+    return out;
+  }
+
+  // ---------------------------------------------------------------- Ogg
+  static oggInfo(u8) {
+    const le32 = (o) => (u8[o] | (u8[o + 1] << 8) | (u8[o + 2] << 16)) + u8[o + 3] * 16777216;
+    const le64 = (o) => le32(o) + le32(o + 4) * 4294967296;
+    const ascii = (o, n) => String.fromCharCode(...u8.subarray(o, o + n));
+    if (ascii(0, 4) !== 'OggS') return null;
+    const segs = u8[26], len0 = Array.from(u8.subarray(27, 27 + segs)).reduce((a, b) => a + b, 0), d = 27 + segs;
+    const out = { tags: {} };
+    if (ascii(d, 8) === 'OpusHead') { out.codec = 'opus'; out.channels = u8[d + 9]; out.preSkip = u8[d + 10] | (u8[d + 11] << 8); out.sampleRate = le32(d + 12); out.decodeRate = 48000; }
+    else if (u8[d] === 1 && ascii(d + 1, 6) === 'vorbis') { out.codec = 'vorbis'; out.channels = u8[d + 11]; out.sampleRate = le32(d + 12); out.bitrateNominal = le32(d + 20); out.decodeRate = out.sampleRate; }
+    else if (u8[d] === 0x7F && ascii(d + 1, 4) === 'FLAC') { out.codec = 'flac'; }
+    else return out;
+    // comment header (second packet) - search the first pages for it
+    const region = u8.subarray(d + len0, Math.min(u8.length, d + len0 + 131072));
+    const rs = (o, n) => new TextDecoder('utf-8').decode(region.subarray(o, o + n));
+    const rl = (o) => (region[o] | (region[o + 1] << 8) | (region[o + 2] << 16)) + region[o + 3] * 16777216;
+    let h = -1; const marker = out.codec === 'opus' ? 'OpusTags' : '\x03vorbis';
+    for (let i = 0; i + marker.length < region.length; i++) { let ok = true; for (let j = 0; j < marker.length; j++) if (region[i + j] !== marker.charCodeAt(j)) { ok = false; break; } if (ok) { h = i + marker.length; break; } }
+    if (h >= 0) {
+      try {
+        const vl = rl(h); out.vendor = rs(h + 4, vl); let q = h + 4 + vl; const n = rl(q); q += 4;
+        for (let i = 0; i < n && q + 4 <= region.length; i++) { const l = rl(q); q += 4; const kv = rs(q, l); q += l; const eq = kv.indexOf('='); if (eq > 0) out.tags[kv.slice(0, eq).toLowerCase()] = kv.slice(eq + 1); }
+      } catch (e) { /* damaged comments */ }
+    }
+    // duration from the last page's granule position
+    for (let i = u8.length - 14; i >= Math.max(0, u8.length - 131072); i--) {
+      if (u8[i] === 0x4F && u8[i + 1] === 0x67 && u8[i + 2] === 0x67 && u8[i + 3] === 0x53) {
+        const g = le64(i + 6);
+        if (g > 0 && g < 2 ** 52) out.duration = out.codec === 'opus' ? Math.max(0, g - (out.preSkip || 0)) / 48000 : (out.sampleRate ? g / out.sampleRate : undefined);
+        break;
+      }
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------- Matroska / WebM
+  static mkvInfo(u8) {
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const readId = (p) => { const b = u8[p]; if (!b) return null; let n = 1; while (!(b & (0x80 >> (n - 1)))) n++; if (n > 4) return null; let id = 0; for (let i = 0; i < n; i++) id = id * 256 + u8[p + i]; return { id, len: n }; };
+    const readSize = (p) => { const b = u8[p]; if (!b) return null; let n = 1; while (!(b & (0x80 >> (n - 1)))) n++; if (n > 8) return null; let v = b & ((0x80 >> (n - 1)) - 1), allOnes = v === ((0x80 >> (n - 1)) - 1); for (let i = 1; i < n; i++) { v = v * 256 + u8[p + i]; if (u8[p + i] !== 255) allOnes = false; } return { size: allOnes ? -1 : v, len: n }; };
+    const uint = (p, n) => { let v = 0; for (let i = 0; i < n; i++) v = v * 256 + u8[p + i]; return v; };
+    const flt = (p, n) => (n === 4 ? dv.getFloat32(p) : n === 8 ? dv.getFloat64(p) : NaN);
+    const str = (p, n) => new TextDecoder('utf-8').decode(u8.subarray(p, p + n)).replace(/\0+$/, '');
+    const out = { tracks: [], info: {}, timecodeScale: 1000000 };
+    const IDS = { EBML: 0x1A45DFA3, SEGMENT: 0x18538067, INFO: 0x1549A966, TRACKS: 0x1654AE6B, CLUSTER: 0x1F43B675, TRACKENTRY: 0xAE, VIDEO: 0xE0, AUDIO: 0xE1 };
+    const walk = (start, end, handler, depth) => {
+      let p = start;
+      while (p + 2 <= end) {
+        const id = readId(p); if (!id) break; const sz = readSize(p + id.len); if (!sz) break;
+        const body = p + id.len + sz.len, bodyEnd = sz.size < 0 ? end : Math.min(end, body + sz.size);
+        if (handler(id.id, body, bodyEnd, depth) === 'stop') return 'stop';
+        p = bodyEnd;
+      }
+    };
+    walk(0, u8.length, (id, b, e) => {
+      if (id === IDS.EBML) walk(b, e, (i, bb, ee) => { if (i === 0x4282) out.docType = str(bb, ee - bb); });
+      else if (id === IDS.SEGMENT) {
+        const r = walk(b, e, (i, bb, ee) => {
+          if (i === IDS.CLUSTER) return 'stop';
+          if (i === IDS.INFO) walk(bb, ee, (x, xb, xe) => {
+            if (x === 0x2AD7B1) out.timecodeScale = uint(xb, xe - xb);
+            else if (x === 0x4489) out.info.duration = flt(xb, xe - xb);
+            else if (x === 0x4D80) out.info.muxingApp = str(xb, xe - xb);
+            else if (x === 0x5741) out.info.writingApp = str(xb, xe - xb);
+            else if (x === 0x7BA9) out.info.title = str(xb, xe - xb);
+            else if (x === 0x4461) { const ns = dv.getBigInt64(xb); out.info.dateUTC = new Date(Date.UTC(2001, 0, 1) + Number(ns / 1000000n)).toISOString(); }
+          });
+          else if (i === IDS.TRACKS) walk(bb, ee, (t, tb, te) => {
+            if (t !== IDS.TRACKENTRY) return;
+            const tr = {};
+            walk(tb, te, (x, xb, xe) => {
+              if (x === 0xD7) tr.number = uint(xb, xe - xb); else if (x === 0x83) tr.type = uint(xb, xe - xb); else if (x === 0x86) tr.codecId = str(xb, xe - xb);
+              else if (x === 0x536E) tr.name = str(xb, xe - xb); else if (x === 0x22B59C) tr.language = str(xb, xe - xb); else if (x === 0x23E383) tr.defaultDuration = uint(xb, xe - xb);
+              else if (x === IDS.VIDEO) walk(xb, xe, (v, vb, ve) => { if (v === 0xB0) tr.width = uint(vb, ve - vb); else if (v === 0xBA) tr.height = uint(vb, ve - vb); else if (v === 0x54B0) tr.displayWidth = uint(vb, ve - vb); else if (v === 0x54BA) tr.displayHeight = uint(vb, ve - vb); });
+              else if (x === IDS.AUDIO) walk(xb, xe, (v, vb, ve) => { if (v === 0xB5) tr.sampleRate = flt(vb, ve - vb); else if (v === 0x9F) tr.channels = uint(vb, ve - vb); else if (v === 0x6264) tr.bitDepth = uint(vb, ve - vb); });
+            });
+            out.tracks.push(tr);
+          });
+        });
+        return 'stop';
+      }
+    });
+    if (!out.docType && !out.tracks.length && !Object.keys(out.info).length) return null;
+    if (out.info.duration) out.duration = out.info.duration * out.timecodeScale / 1e9;
+    return out;
+  }
+
+  // ---------------------------------------------------------------- AAC (MP4 esds)
+  /** Reads the AudioSpecificConfig inside an MP4 'esds' box. `from` is any offset before the box. */
+  static aacConfig(u8, from, limit) {
+    const end = Math.min(u8.length - 8, limit || from + 400);
+    for (let i = from; i < end; i++) {
+      if (u8[i] === 0x65 && u8[i + 1] === 0x73 && u8[i + 2] === 0x64 && u8[i + 3] === 0x73) {       // 'esds'
+        let p = i + 8;                                                                              // skip version/flags
+        const len = () => { let n = 0; for (let k = 0; k < 4; k++) { const b = u8[p++]; n = (n << 7) | (b & 0x7F); if (!(b & 0x80)) break; } return n; };
+        if (u8[p++] !== 0x03) return null; len(); p += 2; const fl = u8[p++]; if (fl & 0x80) p += 2; if (fl & 0x40) p += u8[p] + 1; if (fl & 0x20) p += 2;
+        if (u8[p++] !== 0x04) return null; len(); const oti = u8[p]; p += 13;
+        const avg = ((u8[p - 4] << 24) | (u8[p - 3] << 16) | (u8[p - 2] << 8) | u8[p - 1]) >>> 0;
+        if (u8[p++] !== 0x05) return { objectTypeIndication: oti, avgBitrate: avg || undefined };
+        const n = len(); const asc = u8.subarray(p, p + n);
+        let bit = 0; const bits = (c) => { let v = 0; for (let k = 0; k < c; k++) { v = (v << 1) | ((asc[bit >> 3] >> (7 - (bit & 7))) & 1); bit++; } return v; };
+        let aot = bits(5); if (aot === 31) aot = 32 + bits(6);
+        const fi = bits(4); const rates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+        const sampleRate = fi === 15 ? bits(24) : rates[fi];
+        const cc = bits(4);
+        return { audioObjectType: aot, sampleRate, channels: cc === 7 ? 8 : (cc >= 1 && cc <= 6 ? cc : undefined), avgBitrate: avg || undefined };
+      }
+    }
+    return null;
+  }
+}
+
+MetaExtras.Probe = MediaProbe;
+
 if (typeof window !== 'undefined') window.MetaExtras = MetaExtras;
 if (typeof module !== 'undefined' && module.exports) module.exports = MetaExtras;

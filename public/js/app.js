@@ -95,6 +95,75 @@ document.addEventListener('DOMContentLoaded', () => {
     if (box) box.style.display = busy ? 'flex' : 'none';
   }
 
+  // ---- Long recordings: choose which part to preview -----------------------------------------
+  function fmtClock(sec) {
+    sec = Math.max(0, Math.round(sec));
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s2 = sec % 60;
+    return (h ? h + ':' + String(m).padStart(2, '0') : String(m)) + ':' + String(s2).padStart(2, '0');
+  }
+  function parseClock(text) {
+    const parts = String(text).trim().split(':').map(x => x.trim());
+    if (!parts.length || parts.length > 3 || parts.some(x => !/^\d+(\.\d+)?$/.test(x))) return NaN;
+    return parts.reduce((acc, x) => acc * 60 + parseFloat(x), 0);
+  }
+
+  function updateExcerptBar() {
+    const bar = document.getElementById('excerptBar');
+    const long = audioEngine.isExcerpt && audioEngine.fullBuffer;
+    const wavLabel = document.getElementById('lblExportWav'), mp4Label = document.getElementById('lblExportMp4');
+    if (wavLabel) wavLabel.textContent = long ? 'Download cleaned audio (whole recording)' : 'Download cleaned audio';
+    if (mp4Label) mp4Label.textContent = long ? 'Download cleaned video (whole recording)' : 'Download cleaned video';
+    if (!bar) return;
+    if (!long) { bar.style.display = 'none'; return; }
+    const total = audioEngine.fullBuffer.duration, start = audioEngine.excerptStart, len = audioEngine.originalBuffer.duration;
+    document.getElementById('excerptText').innerHTML =
+      `<strong>Long recording (${fmtClock(total)}).</strong> You are previewing ${fmtClock(start)}–${fmtClock(start + len)}. ` +
+      `Whatever you set here is applied to the <strong>whole recording</strong> when you download.`;
+    document.getElementById('excerptStart').value = fmtClock(start);
+    bar.style.display = 'flex';
+  }
+
+  async function previewFrom(startSec) {
+    if (studioState !== 'ready' || !audioEngine.isExcerpt) return;
+    stopPlayback();
+    const snap = { values: { ...audioEngine.stemValues }, mutes: { ...audioEngine.stemMutes }, solos: { ...audioEngine.stemSolos } };
+    const activePreset = (document.querySelector('.btn-preset.active-preset') || {}).dataset;
+    studioState = 'loading'; setStudioBusy(true); setStudioProgress(0.02, 'Preparing the preview…');
+    try {
+      audioEngine.setExcerpt(startSec, AudioEngine.MAX_PREVIEW_SECONDS);
+      await audioEngine.analyzeAndDecompose((p, m) => setStudioProgress(0.05 + 0.93 * p, `${m} (${Math.floor(p * 100)}%)`),
+        activeAbortController ? activeAbortController.signal : undefined);
+      Object.assign(audioEngine.stemValues, snap.values); Object.assign(audioEngine.stemMutes, snap.mutes); Object.assign(audioEngine.stemSolos, snap.solos);
+      audioEngine.updateAllStemGains();
+      renderMixerStrips(audioEngine.componentDefs, audioEngine.componentEnergy);
+      visualizer.setAudioBuffers(audioEngine.originalBuffer);
+      visualizer.setStems(audioEngine.stems);
+      visualizer.updatePlayhead(0);
+      if (durationDisplay) durationDisplay.textContent = formatTime(audioEngine.getDuration());
+      syncPresetUi(activePreset ? activePreset.preset : null);
+      updateProcessedWaveformPreview();
+      updateExcerptBar();
+      studioState = 'ready';
+    } catch (err) {
+      if (!(err && err.name === 'AbortError')) {
+        console.warn('Preview failed:', err);
+        showToast('⚠️ Could not prepare that part of the recording.', 'warning', 5000);
+      }
+      studioState = 'ready';
+    } finally {
+      setStudioBusy(false);
+    }
+  }
+
+  const btnExcerptApply = document.getElementById('btnExcerptApply');
+  if (btnExcerptApply) btnExcerptApply.addEventListener('click', () => {
+    const t = parseClock(document.getElementById('excerptStart').value);
+    if (isNaN(t)) { showToast('Type a time like 12:30 (minutes:seconds).', 'warning', 3500); return; }
+    previewFrom(t);
+  });
+  const excerptStartInput = document.getElementById('excerptStart');
+  if (excerptStartInput) excerptStartInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') btnExcerptApply.click(); });
+
   function prepareStudio() {
     if (studioState === 'ready' || studioState === 'loading') return studioPromise;
     if (!pendingAudioBytes || !currentFile) return Promise.resolve();
@@ -107,8 +176,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     studioPromise = (async () => {
       try {
-        const audioBuf = await audioEngine.decodeAudio(bytes);
+        await audioEngine.decodeAudio(bytes);
         if (currentFile !== file || (signal && signal.aborted)) return;
+        // Long recordings: the studio previews a few minutes; the download covers all of it
+        audioEngine.setExcerpt(0, AudioEngine.MAX_PREVIEW_SECONDS);
+        const audioBuf = audioEngine.originalBuffer;
 
         const hasVideo = ffprobeData && ffprobeData.streams && ffprobeData.streams.some(st => st.codec_type === 'video');
         if (hasVideo) setupVideoPreview(file);
@@ -127,6 +199,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Start from the recommended clean so sliders, mixer and sound all agree
         applyAutoCleanUi(false);
+        updateExcerptBar();
         studioState = 'ready';
         setStudioBusy(false);
       } catch (err) {
@@ -393,7 +466,7 @@ document.addEventListener('DOMContentLoaded', () => {
   visualizer.onSeek = (seekTime) => {
     audioEngine.seek(seekTime);
     if (previewVideo && currentFile && currentFile.type.includes('video')) {
-      previewVideo.currentTime = seekTime;
+      previewVideo.currentTime = seekTime + (audioEngine.excerptStart || 0);
     }
   };
 
@@ -801,6 +874,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function getFriendlySampleRate(sampleRate) {
     const hz = parseInt(sampleRate || 0);
+    if (!hz) return { text: 'Not stated in file', badge: 'Unknown', desc: 'The file does not say how many sound snapshots it takes per second.' };
     if (hz >= 96000) return { text: `${hz.toLocaleString()} Hz`, badge: 'Ultra High-Res Studio Audio', desc: 'Audiophile/mastering grade clarity.' };
     if (hz >= 48000) return { text: '48,000 Hz (48 kHz)', badge: 'Pro Video / Film Standard', desc: 'Broadcast audio standard synchronized with 24/30 FPS video.' };
     if (hz >= 44100) return { text: '44,100 Hz (44.1 kHz)', badge: 'CD Master Quality', desc: 'Standard music clarity (captures the full range of human hearing 20Hz–20kHz).' };
@@ -809,7 +883,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function getFriendlyChannels(ch, layout) {
-    const c = parseInt(ch || 2);
+    if (!parseInt(ch || 0)) return { text: 'Not stated in file', badge: 'Unknown', desc: 'The file does not say how many audio channels it has.' };
+    const c = parseInt(ch);
     if (c === 1) return { text: '1 Channel (Mono)', badge: 'Single Audio Source', desc: 'Plays the identical sound equally in both ears / speakers.' };
     if (c === 2) return { text: '2 Channels (Stereo)', badge: 'Left & Right Ear Experience', desc: 'Realistic spatial sound separation between left and right ears.' };
     if (c === 6) return { text: '6 Channels (5.1 Surround)', badge: 'Home Cinema Surround', desc: 'Separate audio for Center, Left, Right, Subwoofer, and Rear speakers.' };
@@ -2326,7 +2401,7 @@ document.addEventListener('DOMContentLoaded', () => {
           const seekSec = (val / 100) * duration;
           audioEngine.seek(seekSec);
           if (previewVideo && currentFile && currentFile.type.includes('video')) {
-            previewVideo.currentTime = seekSec;
+            previewVideo.currentTime = seekSec + (audioEngine.excerptStart || 0);
           }
         });
       }
@@ -2356,7 +2431,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } else {
       audioEngine.play();
       if (previewVideo && currentFile && currentFile.type.includes('video')) {
-        previewVideo.currentTime = audioEngine.getCurrentTime();
+        previewVideo.currentTime = audioEngine.getCurrentTime() + (audioEngine.excerptStart || 0);
         try { previewVideo.play(); } catch (e) {}
       }
       setPlayButtonState(true);
@@ -2369,7 +2444,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (previewVideo) {
       try {
         previewVideo.pause();
-        previewVideo.currentTime = 0;
+        previewVideo.currentTime = audioEngine.excerptStart || 0;
       } catch (e) {}
     }
     setPlayButtonState(false);
@@ -2400,8 +2475,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
           // Keep video in sync with audio
           if (previewVideo && currentFile && currentFile.type.includes('video')) {
-            if (Math.abs(previewVideo.currentTime - curTime) > 0.08) {
-              previewVideo.currentTime = curTime;
+            if (Math.abs(previewVideo.currentTime - (curTime + (audioEngine.excerptStart || 0))) > 0.08) {
+              previewVideo.currentTime = curTime + (audioEngine.excerptStart || 0);
             }
           }
         }
@@ -2719,11 +2794,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 8. Export Center Wiring
   btnExportWav.addEventListener('click', async () => {
-    showExportStatus("Rendering Master 32-bit Clean Audio Mix...");
+    showExportStatus(audioEngine.isExcerpt ? 'Cleaning the whole recording…' : 'Rendering the cleaned audio…');
     try {
       const rendered = await audioEngine.renderCleanedAudioBuffer((prog, msg) => {
-        showExportStatus(msg);
-      });
+        showExportStatus(msg, prog);
+      }, { full: true });
       const wavBlob = AudioExporter.bufferToWaveBlob(rendered, 16);
       const filename = currentFile.name.replace(/\.[^/.]+$/, "") + "_cleaned.wav";
       AudioExporter.downloadBlob(wavBlob, filename);
@@ -2738,7 +2813,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!currentFile) return;
     showExportStatus("Preparing Lossless Stream Remuxer...");
     try {
-      const rendered = await audioEngine.renderCleanedAudioBuffer();
+      const rendered = await audioEngine.renderCleanedAudioBuffer((prog, msg) => showExportStatus(msg, prog), { full: true });
       const outputBlob = await MP4Remuxer.replaceAudioInMP4(currentFile, rendered, (prog, msg) => {
         showExportStatus(msg);
       });
@@ -2752,9 +2827,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  function showExportStatus(msg) {
+  function showExportStatus(msg, fraction) {
     exportProgress.style.display = 'flex';
-    exportStatusText.textContent = msg;
+    exportStatusText.textContent = (fraction !== undefined && fraction !== null) ? `${msg} ${Math.min(100, Math.round(fraction * 100))}%` : msg;
   }
 
   function hideExportStatus() {

@@ -419,6 +419,9 @@ class FFprobeParser {
           channels = view.getUint16(i + 20) || 2;
           bitsPerSample = view.getUint16(i + 22) || 16;
           sampleRate = view.getUint16(i + 28) || 44100;
+          // The sample-entry fields are often generic (always "2 channels"); the AAC configuration is exact
+          const asc = this.Extras && this.Extras.Probe ? this.Extras.Probe.aacConfig(data, i, i + 300) : null;
+          if (asc) { if (asc.channels) channels = asc.channels; if (asc.sampleRate) sampleRate = asc.sampleRate; }
         }
       } else if (tag === 'alac') {
         codec = 'alac';
@@ -710,42 +713,21 @@ class FFprobeParser {
       offset = 10 + id3Size;
     }
 
-    // Default MP3 params
-    const sampleRate = 44100;
-    const channels = 2;
-    const bitRateNum = 256000;
-    const duration = (fileSize * 8) / bitRateNum;
-
+    // Technical facts come from the first MPEG frame (and the Xing/VBRI header when present)
+    const P = this.Extras && this.Extras.Probe;
+    const info = P ? P.mp3Info(uint8, offset, fileSize) : null;
+    const stream = { index: 0, codec_name: info && info.layer === 2 ? 'mp2' : info && info.layer === 1 ? 'mp1' : 'mp3',
+      codec_long_name: 'MPEG audio layer ' + (info ? info.layer : '3'), codec_type: 'audio' };
+    const format = { filename: filename, nb_streams: 1, format_name: 'mp3', format_long_name: 'MP2/3 (MPEG audio layer 2/3)', size: fileSize.toString(), probe_score: info ? 95 : 50 };
+    if (info) {
+      Object.assign(stream, { sample_rate: String(info.sampleRate), channels: info.channels, channel_layout: info.channels === 1 ? 'mono' : 'stereo', bit_rate: String(info.bitrate),
+        duration: info.duration.toFixed(6), vbr: info.vbr });
+      Object.assign(format, { duration: info.duration.toFixed(6), bit_rate: String(info.bitrate) });
+      containerTree.push({ box: 'MPEG_FRAME', offset: info.frameStart, size: 4, desc: `First MPEG audio frame: MPEG-${info.mpeg} layer ${info.layer}, ${info.sampleRate} Hz, ${info.channels === 1 ? 'mono' : 'stereo'}${info.vbr ? ', variable bitrate' : ''}` });
+    }
     return {
-      streams: [
-        {
-          index: 0,
-          codec_name: "mp3",
-          codec_long_name: "MP3 (MPEG audio layer 3)",
-          codec_type: "audio",
-          sample_fmt: "fltp",
-          sample_rate: sampleRate.toString(),
-          channels: channels,
-          channel_layout: "stereo",
-          bits_per_sample: 16,
-          bit_rate: bitRateNum.toString(),
-          duration: duration.toFixed(6)
-        }
-      ],
-      format: {
-        filename: filename,
-        nb_streams: 1,
-        format_name: "mp3",
-        format_long_name: "MP2/3 (MPEG audio layer 2/3)",
-        duration: duration.toFixed(6),
-        size: fileSize.toString(),
-        bit_rate: bitRateNum.toString(),
-        probe_score: 95,
-        tags: {
-          ...(tags.TSSE ? { encoder: tags.TSSE } : {}),
-          ...tags
-        }
-      },
+      streams: [stream],
+      format: { ...format, tags: { ...(tags.TSSE ? { encoder: tags.TSSE } : {}), ...tags } },
       container_tree: containerTree,
       all_tags: tags
     };
@@ -861,87 +843,63 @@ class FFprobeParser {
   // 5. Ogg / Opus / Vorbis Inspector
   // ==========================================
   static parseOGG(uint8, view, filename, fileSize) {
-    const containerTree = [{ box: 'OggS', offset: 0, size: 28, desc: 'Ogg Container Page Header' }];
+    const P = this.Extras && this.Extras.Probe;
+    const info = P ? P.oggInfo(uint8) : null;
+    const containerTree = [{ box: 'OggS', offset: 0, size: 27, desc: 'Ogg Container Page Header' }];
     const tags = {};
-    const sampleRate = 48000;
-    const channels = 2;
-    const bitRate = 160000;
-    const duration = (fileSize * 8) / bitRate;
-
-    return {
-      streams: [
-        {
-          index: 0,
-          codec_name: "opus",
-          codec_long_name: "Opus Audio Codec (Ogg Container)",
-          codec_type: "audio",
-          sample_fmt: "fltp",
-          sample_rate: sampleRate.toString(),
-          channels: channels,
-          channel_layout: "stereo",
-          bits_per_sample: 16,
-          bit_rate: bitRate.toString(),
-          duration: duration.toFixed(6)
-        }
-      ],
-      format: {
-        filename: filename,
-        nb_streams: 1,
-        format_name: "ogg",
-        format_long_name: "Ogg Container",
-        duration: duration.toFixed(6),
-        size: fileSize.toString(),
-        bit_rate: bitRate.toString(),
-        probe_score: 100,
-        tags: tags
-      },
-      container_tree: containerTree,
-      all_tags: tags
-    };
+    const stream = { index: 0, codec_name: (info && info.codec) || 'unknown', codec_type: 'audio' };
+    const format = { filename: filename, nb_streams: 1, format_name: 'ogg', format_long_name: 'Ogg Container', size: fileSize.toString(), probe_score: info && info.codec ? 100 : 50 };
+    if (info && info.codec) {
+      stream.codec_long_name = { opus: 'Opus Audio Codec', vorbis: 'Vorbis Audio Codec', flac: 'FLAC Audio (in Ogg)' }[info.codec] || info.codec;
+      if (info.channels) { stream.channels = info.channels; stream.channel_layout = info.channels === 1 ? 'mono' : info.channels === 2 ? 'stereo' : `${info.channels} channels`; }
+      if (info.sampleRate) stream.sample_rate = String(info.sampleRate);
+      if (info.duration) {
+        stream.duration = info.duration.toFixed(6); format.duration = info.duration.toFixed(6);
+        const br = Math.round((fileSize * 8) / info.duration); format.bit_rate = String(br); stream.bit_rate = String(br);
+      }
+      Object.assign(tags, info.tags);
+      if (info.vendor) tags.encoder_library = info.vendor;
+      containerTree.push({ box: info.codec === 'opus' ? 'OpusHead' : 'vorbis_id', offset: 28, size: 19, desc: `${stream.codec_long_name} stream header` });
+    }
+    return { streams: [stream], format: { ...format, tags }, container_tree: containerTree, all_tags: tags };
   }
 
   // ==========================================
   // 6. WebM / Matroska (MKV) Inspector
   // ==========================================
   static parseWebM(uint8, view, filename, fileSize) {
+    const P = this.Extras && this.Extras.Probe;
+    const info = P ? P.mkvInfo(uint8) : null;
     const containerTree = [{ box: 'EBML', offset: 0, size: 32, desc: 'Extensible Binary Meta Language (Matroska/WebM)' }];
     const tags = {};
-
-    return {
-      streams: [
-        {
-          index: 0,
-          codec_name: "vp9",
-          codec_long_name: "Google VP9 Video",
-          codec_type: "video",
-          width: 1920,
-          height: 1080,
-          avg_frame_rate: "30/1"
-        },
-        {
-          index: 1,
-          codec_name: "opus",
-          codec_long_name: "Opus Audio Codec",
-          codec_type: "audio",
-          sample_rate: "48000",
-          channels: 2,
-          channel_layout: "stereo"
+    const CODECS = { 'V_VP8': 'vp8', 'V_VP9': 'vp9', 'V_AV1': 'av1', 'V_MPEG4/ISO/AVC': 'h264', 'V_MPEGH/ISO/HEVC': 'hevc', 'V_MPEG4/ISO/ASP': 'mpeg4', 'V_MS/VFW/FOURCC': 'vfw_fourcc',
+      'A_OPUS': 'opus', 'A_VORBIS': 'vorbis', 'A_AAC': 'aac', 'A_FLAC': 'flac', 'A_AC3': 'ac3', 'A_EAC3': 'eac3', 'A_DTS': 'dts', 'A_MPEG/L3': 'mp3', 'A_PCM/INT/LIT': 'pcm_s16le' };
+    const streams = [];
+    if (info) {
+      (info.tracks || []).forEach((t, i) => {
+        const type = t.type === 1 ? 'video' : t.type === 2 ? 'audio' : t.type === 17 ? 'subtitle' : 'data';
+        const st = { index: i, codec_name: CODECS[t.codecId] || (t.codecId || 'unknown').toLowerCase(), codec_long_name: t.codecId || 'Unknown codec', codec_type: type };
+        if (t.name) st.title = t.name; if (t.language && t.language !== 'und') st.language = t.language;
+        if (type === 'video') {
+          if (t.width) { st.width = t.width; st.height = t.height; st.display_aspect_ratio = `${t.displayWidth || t.width}:${t.displayHeight || t.height}`; }
+          if (t.defaultDuration) st.avg_frame_rate = `${Math.round(1e9 / t.defaultDuration * 1000) / 1000}/1`;
+        } else if (type === 'audio') {
+          if (t.sampleRate) st.sample_rate = String(Math.round(t.sampleRate));
+          if (t.channels) { st.channels = t.channels; st.channel_layout = t.channels === 1 ? 'mono' : t.channels === 2 ? 'stereo' : `${t.channels} channels`; }
+          if (t.bitDepth) st.bits_per_sample = t.bitDepth;
         }
-      ],
-      format: {
-        filename: filename,
-        nb_streams: 2,
-        format_name: "matroska,webm",
-        format_long_name: "Matroska / WebM Container",
-        duration: "10.000000",
-        size: fileSize.toString(),
-        bit_rate: "2400000",
-        probe_score: 100,
-        tags: { ...tags }
-      },
-      container_tree: containerTree,
-      all_tags: tags
-    };
+        streams.push(st);
+      });
+      if (info.docType) tags.doctype = info.docType;
+      if (info.info.muxingApp) tags.muxing_app = info.info.muxingApp;
+      if (info.info.writingApp) { tags.writing_app = info.info.writingApp; tags.encoder = info.info.writingApp; }
+      if (info.info.title) tags.title = info.info.title;
+      if (info.info.dateUTC) tags.creation_time = info.info.dateUTC;
+      containerTree.push({ box: 'Segment', offset: 0, size: fileSize, desc: `Matroska segment${info.docType ? ' (' + info.docType + ')' : ''}: ${streams.length} track(s)` });
+    }
+    const format = { filename: filename, nb_streams: streams.length, format_name: 'matroska,webm', format_long_name: 'Matroska / WebM Container', size: fileSize.toString(), probe_score: info ? 100 : 50 };
+    if (info && info.duration) { format.duration = info.duration.toFixed(6); format.bit_rate = String(Math.round((fileSize * 8) / info.duration)); }
+    return { streams, format: { ...format, tags: { ...tags } }, container_tree: containerTree, all_tags: tags };
   }
 
   // ==========================================

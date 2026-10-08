@@ -150,3 +150,17 @@ if (
 }
 
 console.log("\nALL TESTS PASSED SUCCESSFULLY! 🚀");
+
+
+// --- De-hum must be a real bypass when off (a notch with a tiny Q silences almost everything) ---
+{
+  const off = AudioEngine.notchConfig(false, 60), on = AudioEngine.notchConfig(true, 50);
+  if (off.type !== 'allpass') throw new Error('De-hum OFF must be an all-pass (bypass) filter, got ' + off.type);
+  if (on.type !== 'notch' || on.Q < 5 || on.frequency !== 50) throw new Error('De-hum ON must be a narrow notch at the chosen mains frequency');
+  const e = new AudioEngine();
+  e.setDeHum('50hz');                                  // before any playback: no audio graph exists yet
+  if (!e.dspSettings.deHumEnabled || e.dspSettings.deHumFreq !== 50) throw new Error('setDeHum must be remembered even before the audio graph exists');
+  e.setDeHum('off');
+  if (e.dspSettings.deHumEnabled) throw new Error('setDeHum(off) must disable the filter');
+  console.log('\u2705 De-hum is a true bypass when off, and 50/60 Hz is remembered for the download');
+}

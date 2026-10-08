@@ -98,6 +98,73 @@ class PcmFallback {
   }
 }
 
+/**
+ * Per-frame spectral masks that split a frame into the nine estimated components.
+ * Masks sum to 1 in every frequency bin, so the stems add back up to the original.
+ */
+class StemMasker {
+  constructor(sampleRate, fftSize, stemIds) {
+    this.halfFft = fftSize / 2;
+    this.numStems = stemIds.length;
+    const half = this.halfFft;
+    this.freqHz = new Float32Array(half);
+    for (let k = 0; k < half; k++) this.freqHz[k] = (k * sampleRate) / fftSize;
+    // electrical hum bins (50/60 Hz and harmonics)
+    this.isHumBin = new Uint8Array(half);
+    const humTargets = [50, 60, 100, 120, 150, 180, 200, 240, 300, 360, 480];
+    for (let k = 0; k < half; k++) {
+      for (let t = 0; t < humTargets.length; t++) if (Math.abs(this.freqHz[k] - humTargets[t]) <= 2.2) { this.isHumBin[k] = 1; break; }
+    }
+    this.stemMasks = new Array(this.numStems); this.prevMasks = new Array(this.numStems);
+    for (let s = 0; s < this.numStems; s++) { this.stemMasks[s] = new Float32Array(half); this.prevMasks[s] = new Float32Array(half); }
+    const idx = (id) => stemIds.indexOf(id);
+    this.IDX = { main: idx('main_voice'), bg: idx('bg_voice'), traffic: idx('traffic'), wind: idx('wind'), fan: idx('fan_ac'), hum: idx('hum'), music: idx('music'), noise: idx('noise'), reverb: idx('reverb') };
+  }
+
+  /** Returns the smoothed masks for one frame. Optionally accumulates per-stem energy. */
+  compute(mag, noiseFloor, vocalProminence, energyAccum) {
+    const { halfFft, numStems, freqHz, isHumBin, stemMasks, prevMasks, IDX } = this;
+    for (let s = 0; s < numStems; s++) stemMasks[s].fill(0);
+    for (let k = 0; k < halfFft; k++) {
+      const f = freqHz[k], m = mag[k];
+      const baseline = noiseFloor[k] || 1e-5;
+      const snr = m / (baseline + 1e-6);
+
+      if (f < 35) stemMasks[IDX.traffic][k] = 0.92;                                                   // sub-bass rumble
+      if (isHumBin[k] && snr > 1.8) stemMasks[IDX.hum][k] = 0.88;                                       // mains hum
+      if (f >= 35 && f <= 220 && !stemMasks[IDX.hum][k]) stemMasks[IDX.traffic][k] = Math.min(1.0, (220 - f) / 180) * 0.78;
+      if (f >= 30 && f <= 380) stemMasks[IDX.wind][k] = 0.28 * (1.0 - Math.min(1.0, snr / 10.0));
+      if (f >= 200 && f <= 5500) stemMasks[IDX.fan][k] = Math.min(1.0, baseline / (m + 1e-6)) * 0.70;
+      if (f > 4000) stemMasks[IDX.noise][k] = Math.min(1.0, baseline / (m + 1e-6)) * 0.75;
+
+      const isPeak = k > 1 && k < halfFft - 1 && m > mag[k - 1] && m > mag[k + 1];
+      if (f >= 280 && f <= 3800) {
+        if (vocalProminence > 0.40 && snr > 2.2) { stemMasks[IDX.main][k] = isPeak ? 0.90 : 0.78; stemMasks[IDX.bg][k] = isPeak ? 0.06 : 0.14; }
+        else if (vocalProminence > 0.20 || (snr > 1.15 && snr <= 2.2)) { stemMasks[IDX.main][k] = 0.16; stemMasks[IDX.bg][k] = 0.74; }
+      }
+      if (f >= 500 && f <= 8000 && snr > 3.0 && vocalProminence < 0.35) stemMasks[IDX.music][k] = 0.65;
+      if (f >= 300 && f <= 4500 && vocalProminence < 0.28 && snr > 1.05 && snr < 1.9) stemMasks[IDX.reverb][k] = 0.38;
+
+      // Normalise so the masks sum to 1 (full energy conservation)
+      let maskSum = 0;
+      for (let s = 0; s < numStems; s++) maskSum += stemMasks[s][k];
+      if (maskSum > 0) { const inv = 1.0 / maskSum; for (let s = 0; s < numStems; s++) stemMasks[s][k] *= inv; }
+      else stemMasks[IDX.noise][k] = 1.0;
+
+      // Temporal smoothing: fast attack, slower decay
+      let smoothSum = 0;
+      for (let s = 0; s < numStems; s++) {
+        const cur = stemMasks[s][k], prev = prevMasks[s][k];
+        const smoothed = prev + (cur > prev ? 0.85 : 0.42) * (cur - prev);
+        stemMasks[s][k] = smoothed; prevMasks[s][k] = smoothed; smoothSum += smoothed;
+      }
+      if (smoothSum > 0) { const inv = 1.0 / smoothSum; for (let s = 0; s < numStems; s++) stemMasks[s][k] *= inv; }
+      if (energyAccum) for (let s = 0; s < numStems; s++) energyAccum[s] += m * stemMasks[s][k];
+    }
+    return stemMasks;
+  }
+}
+
 class AudioEngine {
   constructor() {
     this.audioContext = null;
@@ -171,6 +238,9 @@ class AudioEngine {
     this.compSettings = { threshold: -24, ratio: 3, attack: 0.01, release: 0.15 };
     this.limiter = null;
     this.cleanAlgorithm = 'neural_wiener';
+    this.fullBuffer = null;       // the whole decoded recording
+    this.isExcerpt = false;       // true when the studio previews only part of it
+    this.excerptStart = 0;        // seconds
 
     this.isGraphSetup = false;
   }
@@ -186,6 +256,44 @@ class AudioEngine {
     lim.attack.value = 0.001;
     lim.release.value = 0.08;
     return lim;
+  }
+
+  static get MAX_PREVIEW_SECONDS() { return 180; }
+  /**
+   * De-hum filter settings. When de-hum is off the filter must be a true bypass: an all-pass filter.
+   * (A notch with a tiny Q is NOT a bypass: it removes almost the whole spectrum.)
+   */
+  static notchConfig(enabled, freq) {
+    return enabled ? { type: 'notch', frequency: freq || 60, Q: 14.0 } : { type: 'allpass', frequency: 1000, Q: 0.707 };
+  }
+  static applyNotchConfig(node, cfg) { node.type = cfg.type; node.frequency.value = cfg.frequency; node.Q.value = cfg.Q; }
+  static get NOISE_PERCENTILE() { return 0.15; }
+  /** Error thrown when the user cancels (DOMException where available). */
+  static abortError() {
+    if (typeof DOMException !== 'undefined') return new DOMException('Cancelled by user', 'AbortError');
+    const e = new Error('Cancelled by user'); e.name = 'AbortError'; return e;
+  }
+  static get STFT() { return { fftSize: 2048, hopSize: 512 }; }
+  static now() { return (typeof performance !== 'undefined' ? performance.now() : Date.now()); }
+  static hannWindow() {
+    if (!AudioEngine._hann) {
+      const { fftSize } = AudioEngine.STFT; const w = new Float32Array(fftSize);
+      for (let i = 0; i < fftSize; i++) w[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (fftSize - 1)));
+      AudioEngine._hann = w;
+    }
+    return AudioEngine._hann;
+  }
+  /** Magnitude of the mono mid channel from a packed L + jR spectrum. */
+  static midMagnitudes(specR, specI, fftSize, isStereo, mag) {
+    const half = fftSize / 2;
+    for (let k = 0; k < half; k++) {
+      const nk = k === 0 ? 0 : fftSize - k;
+      const zr = specR[k], zi = specI[k], cr = specR[nk], ci = -specI[nk];
+      const lr = 0.5 * (zr + cr), li = 0.5 * (zi + ci);
+      let mr = lr, mi = li;
+      if (isStereo) { const rr = 0.5 * (zi - ci), ri = -0.5 * (zr - cr); mr = 0.5 * (lr + rr); mi = 0.5 * (li + ri); }
+      mag[k] = Math.sqrt(mr * mr + mi * mi);
+    }
   }
 
   initAudioContext() {
@@ -219,7 +327,7 @@ class AudioEngine {
       const onDone = (buf) => {
         if (isSettled) return;
         isSettled = true;
-        this.originalBuffer = buf;
+        this.originalBuffer = buf; this.fullBuffer = buf; this.isExcerpt = false; this.excerptStart = 0;
         resolve(buf);
       };
       const onErr = (err) => {
@@ -231,7 +339,7 @@ class AudioEngine {
             const buf = this.audioContext.createBuffer(pcm.channels.length, pcm.channels[0].length, pcm.sampleRate);
             pcm.channels.forEach((ch, i) => buf.copyToChannel(ch, i));
             isSettled = true;
-            this.originalBuffer = buf;
+            this.originalBuffer = buf; this.fullBuffer = buf; this.isExcerpt = false; this.excerptStart = 0;
             resolve(buf);
             return;
           }
@@ -253,375 +361,261 @@ class AudioEngine {
     });
   }
 
+  // -------------------------------------------------------------------------------------------
+  // Long recordings: the studio works on a preview window, the download covers the whole file
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Chooses the part of the recording the studio previews. Recordings up to `maxSec` are used whole.
+   */
+  setExcerpt(startSec = 0, maxSec = AudioEngine.MAX_PREVIEW_SECONDS) {
+    const full = this.fullBuffer || this.originalBuffer;
+    if (!full) return;
+    this.fullBuffer = full;
+    const sr = full.sampleRate, total = full.length;
+    const len = Math.min(total, Math.round(maxSec * sr));
+    if (len >= total) { this.originalBuffer = full; this.isExcerpt = false; this.excerptStart = 0; return; }
+    const start = Math.max(0, Math.min(total - len, Math.round(startSec * sr)));
+    const b = this.audioContext.createBuffer(full.numberOfChannels, len, sr);
+    for (let c = 0; c < full.numberOfChannels; c++) b.copyToChannel(full.getChannelData(c).subarray(start, start + len), c);
+    this.originalBuffer = b; this.isExcerpt = true; this.excerptStart = start / sr;
+  }
+
+  /** The gain each stem should have right now (mute / solo / fader), in componentDefs order. */
+  getEffectiveGains() {
+    const anySolo = Object.values(this.stemSolos).some(v => v === true);
+    return this.componentDefs.map(def => {
+      const v = this.stemValues[def.id] !== undefined ? this.stemValues[def.id] : 1.0;
+      if (this.stemMutes[def.id]) return 0;
+      if (anySolo) return this.stemSolos[def.id] ? v : 0;
+      return v;
+    });
+  }
+
+  /**
+   * Learns the steady background level of every frequency: the level it sits at during its quietest
+   * ~15% of frames. Frames are sampled evenly across the WHOLE recording (at most ~12,000 of them),
+   * so the result does not depend on how long the recording is and costs about a second.
+   */
+  async learnNoiseStatistics(left, right, isStereo, sampleRate, progress, abortSignal) {
+    const { fftSize, hopSize } = AudioEngine.STFT;
+    const halfFft = fftSize / 2, numSamples = left.length;
+    const numFrames = Math.max(0, Math.floor((numSamples - fftSize) / hopSize) + 1);
+    const window = AudioEngine.hannWindow();
+    const fft = new FastFFT(fftSize);
+    const real = new Float32Array(fftSize), imag = new Float32Array(fftSize);
+    const LOG_MIN = -6, BPD = 12, NB = 120;                       // 10 decades of magnitude, 12 bins each
+    const hist = new Uint32Array(halfFft * NB);
+    const stride = Math.max(1, Math.floor(numFrames / 12000));
+    let used = 0, lastYield = AudioEngine.now();
+    for (let f = 0; f < numFrames; f += stride) {
+      if (abortSignal && abortSignal.aborted) throw AudioEngine.abortError();
+      if (AudioEngine.now() - lastYield > 20) { await yieldToUI(); lastYield = AudioEngine.now(); progress(f / numFrames); }
+      const off = f * hopSize;
+      for (let i = 0; i < fftSize; i++) { real[i] = (isStereo ? 0.5 * (left[off + i] + right[off + i]) : left[off + i]) * window[i]; imag[i] = 0; }
+      fft.transform(real, imag);
+      for (let k = 0; k < halfFft; k++) {
+        const m = Math.sqrt(real[k] * real[k] + imag[k] * imag[k]);
+        let b = Math.floor((Math.log10(m + 1e-12) - LOG_MIN) * BPD);
+        hist[k * NB + (b < 0 ? 0 : b >= NB ? NB - 1 : b)]++;
+      }
+      used++;
+    }
+    const noiseFloor = new Float32Array(halfFft).fill(1e-4);
+    const target = Math.max(1, Math.floor(used * AudioEngine.NOISE_PERCENTILE));
+    for (let k = 0; k < halfFft; k++) {
+      let c = 0;
+      for (let b = 0; b < NB; b++) { c += hist[k * NB + b]; if (c >= target) { noiseFloor[k] = Math.pow(10, LOG_MIN + (b + 0.5) / BPD); break; } }
+    }
+    return { noiseFloor, framesSampled: used };
+  }
+
+  /** Noise profile for a recording, learned once and reused by the preview and the full download. */
+  async getNoiseStats(source, progress = () => {}, abortSignal = null) {
+    if (!this._noiseCache) this._noiseCache = new WeakMap();
+    if (this._noiseCache.has(source)) return this._noiseCache.get(source);
+    const n = source.numberOfChannels;
+    const stats = await this.learnNoiseStatistics(source.getChannelData(0), n > 1 ? source.getChannelData(1) : source.getChannelData(0), n > 1, source.sampleRate, progress, abortSignal);
+    this._noiseCache.set(source, stats);
+    return stats;
+  }
+
+  /**
+   * Cleans a whole recording with the current stem gains in one streaming pass: instead of building
+   * nine stems, the gains are folded into a single mask per frame. Memory stays at one output copy,
+   * so hour-long recordings work. Produces the same audio as summing the stems.
+   */
+  async mixWithGains(source, gains, progressCallback = () => {}, abortSignal = null) {
+    const sampleRate = source.sampleRate, numChannels = source.numberOfChannels, numSamples = source.length;
+    const left = source.getChannelData(0), right = numChannels > 1 ? source.getChannelData(1) : left, isStereo = numChannels > 1;
+    const { fftSize, hopSize } = AudioEngine.STFT;
+    const halfFft = fftSize / 2;
+    const stemIds = this.componentDefs.map(c => c.id), numStems = stemIds.length;
+
+    const { noiseFloor } = await this.getNoiseStats(source, (p) => progressCallback(0.1 * p, 'Listening for background noise…'), abortSignal);
+    const numFrames = Math.max(0, Math.floor((numSamples - fftSize) / hopSize) + 1);
+    const kSpeech0 = Math.ceil(300 * fftSize / sampleRate), kSpeech1 = Math.floor(3400 * fftSize / sampleRate);
+
+    const target = this.audioContext.createBuffer(numChannels, numSamples, sampleRate);
+    const outL = target.getChannelData(0), outR = isStereo ? target.getChannelData(1) : null;
+    const window = AudioEngine.hannWindow(), w2 = new Float32Array(fftSize);
+    for (let i = 0; i < fftSize; i++) w2[i] = window[i] * window[i];
+    const winSumAt = (i) => {
+      let sum = 0; const base = Math.floor(i / hopSize);
+      for (let j = 0; j < fftSize / hopSize; j++) { const f = base - j; if (f < 0 || f >= numFrames) continue; sum += w2[i - f * hopSize]; }
+      return sum;
+    };
+
+    const masker = new StemMasker(sampleRate, fftSize, stemIds);
+    const fft = new FastFFT(fftSize);
+    const real = new Float32Array(fftSize), imag = new Float32Array(fftSize);
+    const specR = new Float32Array(fftSize), specI = new Float32Array(fftSize);
+    const outRe = new Float32Array(fftSize), outIm = new Float32Array(fftSize);
+    const mag = new Float32Array(halfFft), combined = new Float32Array(halfFft);
+    let finalized = 0, lastYield = AudioEngine.now();
+
+    const finalize = (upTo) => {
+      for (let i = finalized; i < upTo; i++) {
+        const ws = winSumAt(i); const norm = ws > 1e-4 ? 1.0 / ws : 1.0;
+        outL[i] *= norm; if (isStereo) outR[i] *= norm;
+      }
+      finalized = upTo;
+    };
+
+    for (let f = 0; f < numFrames; f++) {
+      if (abortSignal && abortSignal.aborted) throw AudioEngine.abortError();
+      if (AudioEngine.now() - lastYield > 20) { await yieldToUI(); lastYield = AudioEngine.now(); progressCallback(0.1 + 0.88 * (f / numFrames), 'Cleaning the recording…'); }
+      const off = f * hopSize;
+      for (let i = 0; i < fftSize; i++) { real[i] = left[off + i] * window[i]; imag[i] = isStereo ? right[off + i] * window[i] : 0; }
+      fft.transform(real, imag);
+      for (let i = 0; i < fftSize; i++) { specR[i] = real[i]; specI[i] = imag[i]; }
+      AudioEngine.midMagnitudes(specR, specI, fftSize, isStereo, mag);
+
+      let vocal = 0, total = 0;
+      for (let k = 0; k < halfFft; k++) { total += mag[k]; if (k >= kSpeech0 && k <= kSpeech1) vocal += mag[k]; }
+      const masks = masker.compute(mag, noiseFloor, total > 0 ? vocal / total : 0, null);
+      combined.fill(0);
+      for (let s = 0; s < numStems; s++) { const g = gains[s]; if (g === 0) continue; const m = masks[s]; for (let k = 0; k < halfFft; k++) combined[k] += g * m[k]; }
+
+      outRe[0] = specR[0] * combined[0]; outIm[0] = specI[0] * combined[0];
+      for (let k = 1; k < halfFft; k++) {
+        const w = combined[k];
+        outRe[k] = specR[k] * w; outIm[k] = specI[k] * w;
+        outRe[fftSize - k] = specR[fftSize - k] * w; outIm[fftSize - k] = specI[fftSize - k] * w;
+      }
+      outRe[halfFft] = specR[halfFft] * combined[halfFft - 1]; outIm[halfFft] = specI[halfFft] * combined[halfFft - 1];
+      fft.inverseTransform(outRe, outIm);
+      for (let i = 0; i < fftSize; i++) { outL[off + i] += outRe[i] * window[i]; if (isStereo) outR[off + i] += outIm[i] * window[i]; }
+      finalize(Math.min(numSamples, (f + 1) * hopSize));
+    }
+    finalize(numSamples);
+    progressCallback(0.98, 'Cleaning the recording…');
+    return target;
+  }
+
   /**
    * Runs the AI Spectral Decomposition into 9 Estimated Components.
    * Uses Fast STFT analysis and psychoacoustic spectral masking.
    */
   async analyzeAndDecompose(progressCallback = () => {}, abortSignal = null) {
     if (!this.originalBuffer) throw new Error("No audio loaded");
-    if (abortSignal && abortSignal.aborted) {
-      throw new DOMException("Decomposition aborted by user", "AbortError");
-    }
+    if (abortSignal && abortSignal.aborted) throw AudioEngine.abortError();
 
     const sampleRate = this.originalBuffer.sampleRate;
     const numChannels = this.originalBuffer.numberOfChannels;
     const numSamples = this.originalBuffer.length;
-
     // Masks are estimated from a mono (mid) mix, then applied to each channel so the
     // stereo image of the original is preserved in every stem.
     const inputLeft = this.originalBuffer.getChannelData(0);
     const inputRight = numChannels > 1 ? this.originalBuffer.getChannelData(1) : inputLeft;
     const isStereo = numChannels > 1;
 
-    // STFT Parameters
-    const fftSize = 2048;
-    const hopSize = 512;
+    const { fftSize, hopSize } = AudioEngine.STFT;
     const halfFft = fftSize / 2;
     const numFrames = Math.floor((numSamples - fftSize) / hopSize) + 1;
-
-    // Hanning Window
-    const window = new Float32Array(fftSize);
-    for (let i = 0; i < fftSize; i++) {
-      window[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (fftSize - 1)));
-    }
-
-    // Allocate 9 stem arrays for output left and right
+    const window = AudioEngine.hannWindow();
     const stemIds = this.componentDefs.map(c => c.id);
-    const stemLeft = {};
-    const stemRight = {};
-    const energyAccumulators = {};
-
-    for (const id of stemIds) {
-      stemLeft[id] = new Float32Array(numSamples);
-      stemRight[id] = new Float32Array(numSamples);
-      energyAccumulators[id] = 0;
-    }
-
-    // Prepare FFT tables
-    const fft = new FastFFT(fftSize);
-
-    // Frame buffers
-    const real = new Float32Array(fftSize);
-    const imag = new Float32Array(fftSize);
-    const mag = new Float32Array(halfFft);
-    const freqHz = new Float32Array(halfFft);
-
-    for (let k = 0; k < halfFft; k++) {
-      freqHz[k] = (k * sampleRate) / fftSize;
-    }
-
-    // Running noise floor tracker (minimum statistics over time frames for fan/hiss)
-    const noiseFloor = new Float32Array(halfFft).fill(1e-4);
-    const speechPresenceHistory = new Float32Array(numFrames);
-
-    // Precompute electrical hum target bins once (eliminates 1M+ inner loop allocations)
-    const isHumBin = new Uint8Array(halfFft);
-    const humTargets = [50, 60, 100, 120, 150, 180, 200, 240, 300, 360, 480];
-    for (let k = 0; k < halfFft; k++) {
-      const f = freqHz[k];
-      for (let t = 0; t < humTargets.length; t++) {
-        if (Math.abs(f - humTargets[t]) <= 2.2) {
-          isHumBin[k] = 1;
-          break;
-        }
-      }
-    }
-
-    const getTime = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
-    let lastYield = getTime();
-
-    // First pass: Track spectral stationary baseline and speech presence
-    for (let frameIdx = 0; frameIdx < numFrames; frameIdx++) {
-      if (abortSignal && abortSignal.aborted) {
-        throw new DOMException("Decomposition aborted by user", "AbortError");
-      }
-      const now = getTime();
-      if (now - lastYield > 20) {
-        await yieldToUI();
-        lastYield = getTime();
-        progressCallback(0.1 + 0.3 * (frameIdx / numFrames), "AI Spectral Modeling: Estimating Acoustic Floors & Formants...");
-      }
-
-      const offset = frameIdx * hopSize;
-      for (let i = 0; i < fftSize; i++) {
-        real[i] = (isStereo ? 0.5 * (inputLeft[offset + i] + inputRight[offset + i]) : inputLeft[offset + i]) * window[i];
-        imag[i] = 0;
-      }
-
-      fft.transform(real, imag);
-
-      let frameVocalEnergy = 0;
-      let totalFrameEnergy = 0;
-
-      for (let k = 0; k < halfFft; k++) {
-        const m = Math.sqrt(real[k] * real[k] + imag[k] * imag[k]);
-        mag[k] = m;
-        totalFrameEnergy += m;
-
-        // Track minimum statistics for stationary noise (Fan / AC / Hiss)
-        if (m < noiseFloor[k]) {
-          noiseFloor[k] = noiseFloor[k] * 0.9 + m * 0.1;
-        } else {
-          noiseFloor[k] = noiseFloor[k] * 0.999 + m * 0.001;
-        }
-
-        // Formant speech band (300Hz - 3400Hz)
-        if (freqHz[k] >= 300 && freqHz[k] <= 3400) {
-          frameVocalEnergy += m;
-        }
-      }
-
-      speechPresenceHistory[frameIdx] = totalFrameEnergy > 0 ? frameVocalEnergy / totalFrameEnergy : 0;
-    }
-
-    // Second pass: Multi-Component Spectral Masking & Inverse STFT Synthesis
-    const windowSum = new Float32Array(numSamples);
     const numStems = stemIds.length;
-    const stemIdMap = {};
-    stemIds.forEach((id, idx) => { stemIdMap[id] = idx; });
 
-    // Pre-allocate mask arrays ONCE outside frame loop (eliminates 10,000+ GC heap allocations)
-    const stemMasks = new Array(numStems);
-    const prevMasks = new Array(numStems);
-    for (let s = 0; s < numStems; s++) {
-      stemMasks[s] = new Float32Array(halfFft);
-      prevMasks[s] = new Float32Array(halfFft);
+    // Pass 1: learn the background noise from the WHOLE recording (not just the preview window)
+    const { noiseFloor } = await this.getNoiseStats(this.fullBuffer || this.originalBuffer,
+      (p) => progressCallback(0.1 + 0.3 * p, "AI Spectral Modeling: Estimating Acoustic Floors & Formants..."), abortSignal);
+    const kSpeech0 = Math.ceil(300 * fftSize / sampleRate), kSpeech1 = Math.floor(3400 * fftSize / sampleRate);
+
+    // Stems are written straight into AudioBuffers (no second copy in memory)
+    const stemBuffers = {}, stemLeft = {}, stemRight = {};
+    for (const id of stemIds) {
+      stemBuffers[id] = this.audioContext.createBuffer(2, numSamples, sampleRate);
+      stemLeft[id] = stemBuffers[id].getChannelData(0);
+      stemRight[id] = stemBuffers[id].getChannelData(1);
     }
-
-    // Direct numeric indices:
-    const IDX_MAIN   = stemIdMap['main_voice'];
-    const IDX_BG     = stemIdMap['bg_voice'];
-    const IDX_TRAF   = stemIdMap['traffic'];
-    const IDX_WIND   = stemIdMap['wind'];
-    const IDX_FAN    = stemIdMap['fan_ac'];
-    const IDX_HUM    = stemIdMap['hum'];
-    const IDX_MUSIC  = stemIdMap['music'];
-    const IDX_NOISE  = stemIdMap['noise'];
-    const IDX_REVERB = stemIdMap['reverb'];
-
     const stemLeftArr = stemIds.map(id => stemLeft[id]);
     const stemRightArr = stemIds.map(id => stemRight[id]);
     const energyAccumArr = new Float64Array(numStems);
 
-    // Prepare stem-specific FFT buffers
-    const origSpecReal = new Float32Array(fftSize);
-    const origSpecImag = new Float32Array(fftSize);
-    const stemReal = new Float32Array(fftSize);
-    const stemImag = new Float32Array(fftSize);
+    const masker = new StemMasker(sampleRate, fftSize, stemIds);
+    const fft = new FastFFT(fftSize);
+    const real = new Float32Array(fftSize), imag = new Float32Array(fftSize);
+    const origSpecReal = new Float32Array(fftSize), origSpecImag = new Float32Array(fftSize);
+    const stemReal = new Float32Array(fftSize), stemImag = new Float32Array(fftSize);
+    const mag = new Float32Array(halfFft);
+    const windowSum = new Float32Array(numSamples);
+    let lastYield = AudioEngine.now();
 
-    lastYield = getTime();
-
+    // Pass 2: multi-component spectral masking and inverse STFT synthesis
     for (let frameIdx = 0; frameIdx < numFrames; frameIdx++) {
-      if (abortSignal && abortSignal.aborted) {
-        throw new DOMException("Decomposition aborted by user", "AbortError");
-      }
-      const now = getTime();
-      if (now - lastYield > 20) {
-        await yieldToUI();
-        lastYield = getTime();
+      if (abortSignal && abortSignal.aborted) throw AudioEngine.abortError();
+      if (AudioEngine.now() - lastYield > 20) {
+        await yieldToUI(); lastYield = AudioEngine.now();
         progressCallback(0.4 + 0.5 * (frameIdx / numFrames), "AI Stem Separation: Synthesizing 9 Component Channels...");
       }
-
       const offset = frameIdx * hopSize;
-
       // One complex FFT carries both channels (L in real part, R in imaginary part)
-      for (let i = 0; i < fftSize; i++) {
-        real[i] = inputLeft[offset + i] * window[i];
-        imag[i] = isStereo ? inputRight[offset + i] * window[i] : 0;
-      }
+      for (let i = 0; i < fftSize; i++) { real[i] = inputLeft[offset + i] * window[i]; imag[i] = isStereo ? inputRight[offset + i] * window[i] : 0; }
       fft.transform(real, imag);
+      for (let i = 0; i < fftSize; i++) { origSpecReal[i] = real[i]; origSpecImag[i] = imag[i]; }
+      AudioEngine.midMagnitudes(origSpecReal, origSpecImag, fftSize, isStereo, mag);
 
-      // Keep the packed spectrum Z = L + jR for synthesis
-      for (let i = 0; i < fftSize; i++) {
-        origSpecReal[i] = real[i];
-        origSpecImag[i] = imag[i];
-      }
-
-      // Mid-channel magnitude per bin: M = (L + R) / 2 = (Z[k] + conj(Z[N-k])) / 2 * ... (see derivation below)
-      // L[k] = (Z[k] + conj(Z[N-k])) / 2 ,  R[k] = (Z[k] - conj(Z[N-k])) / (2j)
-      for (let k = 0; k < halfFft; k++) {
-        const nk = k === 0 ? 0 : fftSize - k;
-        const zr = origSpecReal[k], zi = origSpecImag[k];
-        const cr = origSpecReal[nk], ci = -origSpecImag[nk];
-        const lr = 0.5 * (zr + cr), li = 0.5 * (zi + ci);
-        let mr = lr, mi = li;
-        if (isStereo) {
-          const rr = 0.5 * (zi - ci), ri = -0.5 * (zr - cr);
-          mr = 0.5 * (lr + rr); mi = 0.5 * (li + ri);
-        }
-        mag[k] = Math.sqrt(mr * mr + mi * mi);
-      }
-
-      const vocalProminence = speechPresenceHistory[frameIdx];
-
-      // Reset pre-allocated mask buffers (zero GC)
-      for (let s = 0; s < numStems; s++) {
-        stemMasks[s].fill(0);
-      }
-
-      for (let k = 0; k < halfFft; k++) {
-        const f = freqHz[k];
-        const m = mag[k];
-        const baseline = noiseFloor[k] || 1e-5;
-        const snr = m / (baseline + 1e-6);
-
-        // Sub-bass rumble (< 35 Hz) -> direct to traffic
-        if (f < 35) {
-          stemMasks[IDX_TRAF][k] = 0.92;
-        }
-
-        // 1. Hum (50/60 Hz harmonics from precomputed bit-table)
-        if (isHumBin[k] && snr > 1.8) {
-          stemMasks[IDX_HUM][k] = 0.88;
-        }
-
-        // 2. Traffic / Vehicles: Low frequency rumble 35Hz - 220Hz
-        if (f >= 35 && f <= 220 && !stemMasks[IDX_HUM][k]) {
-          stemMasks[IDX_TRAF][k] = Math.min(1.0, (220 - f) / 180) * 0.78;
-        }
-
-        // 3. Wind: Low-mid turbulent gusts (30Hz - 380Hz)
-        if (f >= 30 && f <= 380) {
-          stemMasks[IDX_WIND][k] = 0.28 * (1.0 - Math.min(1.0, snr / 10.0));
-        }
-
-        // 4. Fan / AC: Stationary floor in 200Hz - 5500Hz
-        if (f >= 200 && f <= 5500) {
-          stemMasks[IDX_FAN][k] = Math.min(1.0, baseline / (m + 1e-6)) * 0.70;
-        }
-
-        // 5. General Noise / Hiss: High frequency stationary floor
-        if (f > 4000) {
-          const hissRatio = Math.min(1.0, baseline / (m + 1e-6));
-          stemMasks[IDX_NOISE][k] = hissRatio * 0.75;
-        }
-
-        // 6. Speech Formant Bands: Foreground Voice vs Background Chatter
-        const isPeak = k > 1 && k < halfFft - 1 && m > mag[k-1] && m > mag[k+1];
-
-        if (f >= 280 && f <= 3800) {
-          if (vocalProminence > 0.40 && snr > 2.2) {
-            stemMasks[IDX_MAIN][k] = isPeak ? 0.90 : 0.78;
-            stemMasks[IDX_BG][k]   = isPeak ? 0.06 : 0.14;
-          } else if (vocalProminence > 0.20 || (snr > 1.15 && snr <= 2.2)) {
-            stemMasks[IDX_MAIN][k] = 0.16;
-            stemMasks[IDX_BG][k]   = 0.74;
-          }
-        }
-
-        // 7. Music: Harmonic persistence above vocal band
-        if (f >= 500 && f <= 8000 && snr > 3.0 && vocalProminence < 0.35) {
-          stemMasks[IDX_MUSIC][k] = 0.65;
-        }
-
-        // 8. Reverb / Echo: Diffuse decay tail in mid frequencies
-        if (f >= 300 && f <= 4500 && vocalProminence < 0.28 && snr > 1.05 && snr < 1.9) {
-          stemMasks[IDX_REVERB][k] = 0.38;
-        }
-
-        // Normalization: Ensure sum of masks = 1.0 (Full energy conservation)
-        let maskSum = 0;
-        for (let s = 0; s < numStems; s++) {
-          maskSum += stemMasks[s][k];
-        }
-
-        if (maskSum > 0) {
-          const invSum = 1.0 / maskSum;
-          for (let s = 0; s < numStems; s++) {
-            stemMasks[s][k] *= invSum;
-          }
-        } else {
-          stemMasks[IDX_NOISE][k] = 1.0;
-        }
-
-        // Adaptive Temporal Smoothing: Fast attack (0.85), smooth decay (0.42)
-        let smoothSum = 0;
-        for (let s = 0; s < numStems; s++) {
-          const cur = stemMasks[s][k];
-          const prev = prevMasks[s][k];
-          const alpha = cur > prev ? 0.85 : 0.42;
-          const smoothed = prev + alpha * (cur - prev);
-          stemMasks[s][k] = smoothed;
-          prevMasks[s][k] = smoothed;
-          smoothSum += smoothed;
-        }
-        if (smoothSum > 0) {
-          const invSmooth = 1.0 / smoothSum;
-          for (let s = 0; s < numStems; s++) {
-            stemMasks[s][k] *= invSmooth;
-          }
-        }
-
-        // Accumulate energy statistics for UI
-        for (let s = 0; s < numStems; s++) {
-          energyAccumArr[s] += m * stemMasks[s][k];
-        }
-      }
+      let vocal = 0, total = 0;
+      for (let k = 0; k < halfFft; k++) { total += mag[k]; if (k >= kSpeech0 && k <= kSpeech1) vocal += mag[k]; }
+      const stemMasks = masker.compute(mag, noiseFloor, total > 0 ? vocal / total : 0, energyAccumArr);
 
       // Synthesize each stem: a real-valued mask is symmetric, so masking Z = L + jR and
       // inverse-transforming returns the stem's left channel (real) and right channel (imag).
       for (let s = 0; s < numStems; s++) {
         const mask = stemMasks[s];
-        stemReal[0] = origSpecReal[0] * mask[0];
-        stemImag[0] = origSpecImag[0] * mask[0];
+        stemReal[0] = origSpecReal[0] * mask[0]; stemImag[0] = origSpecImag[0] * mask[0];
         for (let k = 1; k < halfFft; k++) {
           const w = mask[k];
-          stemReal[k] = origSpecReal[k] * w;
-          stemImag[k] = origSpecImag[k] * w;
-          stemReal[fftSize - k] = origSpecReal[fftSize - k] * w;
-          stemImag[fftSize - k] = origSpecImag[fftSize - k] * w;
+          stemReal[k] = origSpecReal[k] * w; stemImag[k] = origSpecImag[k] * w;
+          stemReal[fftSize - k] = origSpecReal[fftSize - k] * w; stemImag[fftSize - k] = origSpecImag[fftSize - k] * w;
         }
-        stemReal[halfFft] = origSpecReal[halfFft] * mask[halfFft - 1];
-        stemImag[halfFft] = origSpecImag[halfFft] * mask[halfFft - 1];
-
+        stemReal[halfFft] = origSpecReal[halfFft] * mask[halfFft - 1]; stemImag[halfFft] = origSpecImag[halfFft] * mask[halfFft - 1];
         fft.inverseTransform(stemReal, stemImag);
-
-        const targetL = stemLeftArr[s];
-        const targetR = stemRightArr[s];
+        const targetL = stemLeftArr[s], targetR = stemRightArr[s];
         for (let i = 0; i < fftSize; i++) {
           targetL[offset + i] += stemReal[i] * window[i];
           if (isStereo) targetR[offset + i] += stemImag[i] * window[i];
         }
       }
-
-      // Window overlap sum for normalization
-      for (let i = 0; i < fftSize; i++) {
-        windowSum[offset + i] += window[i] * window[i];
-      }
+      for (let i = 0; i < fftSize; i++) windowSum[offset + i] += window[i] * window[i];
     }
 
     // Normalize overlap-add by window sum
     for (let i = 0; i < numSamples; i++) {
       const norm = windowSum[i] > 1e-4 ? 1.0 / windowSum[i] : 1.0;
-      for (let s = 0; s < numStems; s++) {
-        stemLeftArr[s][i] *= norm;
-        stemRightArr[s][i] *= norm;
-      }
+      for (let s = 0; s < numStems; s++) { stemLeftArr[s][i] *= norm; stemRightArr[s][i] *= norm; }
     }
+    if (!isStereo) for (const id of stemIds) stemRight[id].set(stemLeft[id]);
 
-    // Calculate energy percentages for UI display
+    // Energy percentages for UI display
     let totalAllEnergy = 0;
-    for (let s = 0; s < numStems; s++) {
-      totalAllEnergy += energyAccumArr[s];
-    }
-    for (let s = 0; s < numStems; s++) {
-      const id = stemIds[s];
-      this.componentEnergy[id] = totalAllEnergy > 0 ? (energyAccumArr[s] / totalAllEnergy) * 100 : 0;
-    }
-    if (!isStereo) {
-      for (const id of stemIds) stemRight[id].set(stemLeft[id]);
-    }
-    // Create AudioBuffers for each stem
+    for (let s = 0; s < numStems; s++) totalAllEnergy += energyAccumArr[s];
+    for (let s = 0; s < numStems; s++) this.componentEnergy[stemIds[s]] = totalAllEnergy > 0 ? (energyAccumArr[s] / totalAllEnergy) * 100 : 0;
     for (const id of stemIds) {
-      const buffer = this.audioContext.createBuffer(2, numSamples, sampleRate);
-      buffer.copyToChannel(stemLeft[id], 0);
-      buffer.copyToChannel(stemRight[id], 1);
-      this.stems[id] = buffer;
-      this.stemValues[id] = 1.0; // 0 dB unity gain default
-      this.stemMutes[id] = false;
-      this.stemSolos[id] = false;
+      this.stems[id] = stemBuffers[id];
+      this.stemValues[id] = 1.0; this.stemMutes[id] = false; this.stemSolos[id] = false;
     }
-
     progressCallback(1.0, "AI Decomposition Complete: 9 Component Layers Isolated.");
     return { stems: this.stems, energy: this.componentEnergy };
   }
@@ -815,9 +809,7 @@ class AudioEngine {
 
     // 4. De-Hum Notch Filter (50Hz or 60Hz)
     this.notchHum = this.audioContext.createBiquadFilter();
-    this.notchHum.type = 'notch';
-    this.notchHum.frequency.value = this.dspSettings.deHumFreq || 60;
-    this.notchHum.Q.value = this.dspSettings.deHumEnabled ? 14.0 : 0.001;
+    AudioEngine.applyNotchConfig(this.notchHum, AudioEngine.notchConfig(this.dspSettings.deHumEnabled, this.dspSettings.deHumFreq));
 
     // 5. De-Esser (Sibilance control at 6.8 kHz)
     this.deEsser = this.audioContext.createBiquadFilter();
@@ -905,22 +897,12 @@ class AudioEngine {
   }
 
   setDeHum(mode) {
+    const enabled = mode === '50hz' || mode === '60hz';
     this.dspSettings.deHumMode = mode;
-    if (!this.audioContext || !this.notchHum) return;
-    const now = this.audioContext.currentTime;
-    if (mode === '50hz') {
-      this.notchHum.frequency.setValueAtTime(50, now);
-      this.notchHum.Q.setValueAtTime(14.0, now);
-      this.dspSettings.deHumEnabled = true;
-    } else if (mode === '60hz') {
-      this.notchHum.frequency.setValueAtTime(60, now);
-      this.notchHum.Q.setValueAtTime(14.0, now);
-      this.dspSettings.deHumEnabled = true;
-    } else {
-      this.notchHum.frequency.setValueAtTime(10, now);
-      this.notchHum.Q.setValueAtTime(0.001, now);
-      this.dspSettings.deHumEnabled = false;
-    }
+    this.dspSettings.deHumEnabled = enabled;
+    if (enabled) this.dspSettings.deHumFreq = mode === '50hz' ? 50 : 60;
+    if (!this.audioContext || !this.notchHum) return;       // the download render reads dspSettings
+    AudioEngine.applyNotchConfig(this.notchHum, AudioEngine.notchConfig(enabled, this.dspSettings.deHumFreq));
   }
 
   setDeEsser(amountPercent) {
@@ -1225,16 +1207,24 @@ class AudioEngine {
   /**
    * Renders the Cleaned Audio to an offline AudioBuffer for export.
    */
-  async renderCleanedAudioBuffer(progressCallback = () => {}) {
+  async renderCleanedAudioBuffer(progressCallback = () => {}, options = {}) {
     if (!this.originalBuffer || !this.stems.main_voice) {
       throw new Error("No decomposed audio available to render");
     }
+    // `full`: clean the WHOLE recording with the current settings (used for downloads of long
+    // recordings, where the studio only previews a part of it).
+    const useFull = Boolean(options.full && this.isExcerpt && this.fullBuffer);
+    let mixed = null;
+    if (useFull) {
+      mixed = await this.mixWithGains(this.fullBuffer, this.getEffectiveGains(), (p, msg) => progressCallback(0.02 + 0.8 * p, msg), options.signal);
+    } else {
+      progressCallback(0.1, "Rendering High-Precision Master Mix...");
+    }
 
-    progressCallback(0.1, "Rendering High-Precision Master Mix...");
-
-    const sampleRate = this.originalBuffer.sampleRate;
-    const numChannels = this.originalBuffer.numberOfChannels;
-    const numSamples = this.originalBuffer.length;
+    const base = useFull ? this.fullBuffer : this.originalBuffer;
+    const sampleRate = base.sampleRate;
+    const numChannels = base.numberOfChannels;
+    const numSamples = base.length;
 
     // Create OfflineAudioContext
     const OfflineContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
@@ -1244,7 +1234,14 @@ class AudioEngine {
     const stemBus = offlineCtx.createGain();
     const anySolo = Object.values(this.stemSolos).some(v => v === true);
 
-    for (const def of this.componentDefs) {
+    if (useFull) {
+      const src = offlineCtx.createBufferSource();
+      src.buffer = mixed;
+      src.connect(stemBus);
+      src.start(0);
+    }
+
+    for (const def of (useFull ? [] : this.componentDefs)) {
       const stemBuffer = this.stems[def.id];
       if (stemBuffer) {
         const src = offlineCtx.createBufferSource();
@@ -1275,9 +1272,7 @@ class AudioEngine {
 
     // Apply De-Hum Notch Filter in offline context
     const notch = offlineCtx.createBiquadFilter();
-    notch.type = 'notch';
-    notch.frequency.value = this.dspSettings.deHumFreq || 60;
-    notch.Q.value = this.dspSettings.deHumEnabled ? 14.0 : 0.001;
+    AudioEngine.applyNotchConfig(notch, AudioEngine.notchConfig(this.dspSettings.deHumEnabled, this.dspSettings.deHumFreq));
 
     // Apply De-Esser in offline context
     const deEss = offlineCtx.createBiquadFilter();
@@ -1326,7 +1321,7 @@ class AudioEngine {
     master.connect(limiter);
     limiter.connect(offlineCtx.destination);
 
-    progressCallback(0.5, "Mastering Audio Engine Running...");
+    progressCallback(useFull ? 0.85 : 0.5, "Applying EQ, compression and limiter...");
     const renderedBuffer = await offlineCtx.startRendering();
     AudioEngine.guardPeaks(renderedBuffer);
     progressCallback(1.0, "Master Audio Rendered Successfully.");

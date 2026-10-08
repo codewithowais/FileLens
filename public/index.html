@@ -6,7 +6,7 @@
   <title>FileLens - See where any file really came from</title>
   <meta name="description" content="Free, private file inspector. See who made a file, when, on what device, whether it was made by AI, whether its Content Credentials (C2PA) are genuine, and clean up audio. Runs entirely in your browser.">
   <meta name="theme-color" content="#0b1020">
-  <link rel="stylesheet" href="css/style.css?v=3.31">
+  <link rel="stylesheet" href="css/style.css?v=3.42">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔍</text></svg>">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -146,6 +146,14 @@
         </div>
         <!-- Studio Quick Actions & Workflow Complexity Bar -->
         <p class="studio-howto"><strong>How it works:</strong> press <strong>Clean my audio</strong>, then play the file and switch between <strong>Before</strong> and <strong>After</strong> to hear the difference. When you like it, scroll down to download.</p>
+        <div id="excerptBar" class="excerpt-bar" style="display: none;">
+          <div id="excerptText" class="excerpt-text"></div>
+          <div class="excerpt-controls">
+            <label for="excerptStart">Preview from</label>
+            <input type="text" id="excerptStart" class="excerpt-input" value="0:00" size="7" inputmode="numeric" aria-label="Preview start time (minutes:seconds)">
+            <button type="button" id="btnExcerptApply" class="btn btn-sm btn-outline">Preview this part</button>
+          </div>
+        </div>
         <div class="studio-quick-bar">
           <div class="quick-bar-left">
             <button type="button" class="btn-auto-clean" id="btnAutoClean" title="Instantly apply optimal voice preservation and noise suppression">
@@ -639,7 +647,7 @@
                 <polyline points="7 10 12 15 17 10"/>
                 <line x1="12" y1="15" x2="12" y2="3"/>
               </svg>
-              Download cleaned audio
+              <span id="lblExportWav">Download cleaned audio</span>
             </button>
           </div>
 
@@ -659,7 +667,7 @@
                 <line x1="17" y1="17" x2="22" y2="17"/>
                 <line x1="17" y1="7" x2="22" y2="7"/>
               </svg>
-              Download cleaned video
+              <span id="lblExportMp4">Download cleaned video</span>
             </button>
           </div>
         </div>
@@ -821,15 +829,15 @@
   </footer>
 
   <!-- Scripts -->
-  <script src="js/audio-engine.js?v=3.31"></script>
-  <script src="js/spectrogram.js?v=3.31"></script>
-  <script src="js/metadata-extras.js?v=3.31"></script>
-  <script src="js/c2pa-trust-anchors.js?v=3.31"></script>
-  <script src="js/c2pa-verifier.js?v=3.31"></script>
-  <script src="js/ai-detector.js?v=3.31"></script>
-  <script src="js/ffprobe-parser.js?v=3.31"></script>
-  <script src="js/audio-exporter.js?v=3.31"></script>
-  <script src="js/mp4-muxer.js?v=3.31"></script>
-  <script src="js/app.js?v=3.31"></script>
+  <script src="js/audio-engine.js?v=3.42"></script>
+  <script src="js/spectrogram.js?v=3.42"></script>
+  <script src="js/metadata-extras.js?v=3.42"></script>
+  <script src="js/c2pa-trust-anchors.js?v=3.42"></script>
+  <script src="js/c2pa-verifier.js?v=3.42"></script>
+  <script src="js/ai-detector.js?v=3.42"></script>
+  <script src="js/ffprobe-parser.js?v=3.42"></script>
+  <script src="js/audio-exporter.js?v=3.42"></script>
+  <script src="js/mp4-muxer.js?v=3.42"></script>
+  <script src="js/app.js?v=3.42"></script>
 </body>
 </html>
