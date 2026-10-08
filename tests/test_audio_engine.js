@@ -164,3 +164,14 @@ console.log("\nALL TESTS PASSED SUCCESSFULLY! 🚀");
   if (e.dspSettings.deHumEnabled) throw new Error('setDeHum(off) must disable the filter');
   console.log('\u2705 De-hum is a true bypass when off, and 50/60 Hz is remembered for the download');
 }
+
+// --- Soft clipper after the limiter: transparent at normal levels, bounded and smooth when boosted hard ---
+{
+  const c = AudioEngine.softClipCurve(), n = c.length, at = (x) => c[Math.round((x + 1) / 2 * (n - 1))];
+  if (Math.abs(at(0.5) - 0.5) > 1e-3 || Math.abs(at(-0.3) + 0.3) > 1e-3) throw new Error('soft clipper must leave normal levels untouched');
+  let max = 0, mono = true; for (let i = 1; i < n; i++) { max = Math.max(max, Math.abs(c[i])); if (c[i] < c[i - 1] - 1e-9) mono = false; }
+  if (max >= 0.99) throw new Error('soft clipper output must stay below full scale, got ' + max);
+  if (!mono) throw new Error('soft clipper curve must be monotonic');
+  if (Math.abs(at(1) + at(-1)) > 1e-6) throw new Error('soft clipper must be symmetric');
+  console.log(`✅ Soft clipper: untouched below 0.7, smooth, symmetric, never above ${max.toFixed(3)}`);
+}

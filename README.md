@@ -61,6 +61,12 @@ The trust list in `public/js/c2pa-trust-anchors.js` changes over time. Refresh i
 
 For files with audio, a second tab separates the sound into nine estimated layers (main voice, background voices, traffic, wind, fan/AC, hum, music, noise, reverb) using STFT spectral masking. **Simple** mode gives you a one-click clean, a Before/After switch and a few sliders. **Advanced** mode adds a full mixer with mute/solo, EQ, compressor, de-esser, de-hum and a peak limiter. Export cleaned audio as WAV, or replace the audio in an MP4 without re-encoding the video.
 
+**Volume boost:** the Overall volume control goes up to **+30 dB**, with one-tap +6 / +12 / +18 / +24 dB buttons. A limiter and soft clipper after it keep loud boosts from distorting (peaks never exceed about -0.8 dBFS).
+
+**Rewind / fast-forward:** the ⏪ / ⏩ buttons jump 10 seconds on a click and scan quickly while held. Keyboard (in the studio): `←` / `→` skip 5 s, `Shift` + arrow skips 30 s, `J` / `L` skip 10 s, `Space` plays or pauses.
+
+**Long recordings:** the studio previews 3 minutes (you pick where), and the download cleans the whole recording in one streaming pass. A 65-minute voice memo downloads in about 3 minutes.
+
 The analysis runs when you open the Audio Cleaning tab, so file details appear instantly.
 
 ---

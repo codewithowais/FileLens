@@ -2096,11 +2096,20 @@ document.addEventListener('DOMContentLoaded', () => {
     updateProcessedWaveformPreviewDebounced();
   });
 
+  const hintMasterVol = document.getElementById('hintMasterVol');
   slMasterVol.addEventListener('input', (e) => {
     const val = parseFloat(e.target.value);
     lblMasterVol.textContent = val > 0 ? `+${val.toFixed(1)} dB` : `${val.toFixed(1)} dB`;
     audioEngine.setMasterVolume(val);
+    document.querySelectorAll('#groupBoost .btn-segmented').forEach(b => b.classList.toggle('active', parseFloat(b.dataset.boost) === val));
+    if (hintMasterVol) hintMasterVol.textContent = val > 12
+      ? 'Very loud. Background noise and hiss get louder too, so lower the "Remove background noise" setting only if the voice sounds thin.'
+      : 'Makes everything louder, up to +30 dB. A limiter stops it from distorting.';
   });
+  document.querySelectorAll('#groupBoost .btn-segmented').forEach(btn => btn.addEventListener('click', () => {
+    slMasterVol.value = btn.dataset.boost;
+    slMasterVol.dispatchEvent(new Event('input', { bubbles: true }));
+  }));
 
   function syncMixerUiFromEngine() {
     audioEngine.componentDefs.forEach(def => {
@@ -2408,11 +2417,53 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // ---- Rewind / fast-forward -------------------------------------------------------------------
+  function jumpTo(t) {
+    const dur = audioEngine.getDuration();
+    if (!(dur > 0)) return;
+    t = Math.max(0, Math.min(dur - 0.05, t));
+    audioEngine.seek(t);
+    if (previewVideo && currentFile && currentFile.type.includes('video')) previewVideo.currentTime = t + (audioEngine.excerptStart || 0);
+    // keep the display right even while paused (the animation loop only runs during playback)
+    timelineScrubber.value = (t / dur) * 100;
+    if (currentTimeDisplay) currentTimeDisplay.textContent = formatTime(t);
+    if (visualizer && visualizer.updatePlayhead) visualizer.updatePlayhead(t);
+  }
+  function skipBy(delta) {
+    if (!audioEngine.originalBuffer) return;
+    jumpTo(audioEngine.getCurrentTime() + delta);
+  }
+
+  // Click = jump 10 s. Press and hold = scan quickly (about 16x) until released.
+  function wireSkipButton(btn, direction) {
+    let holdTimer = null, scanTimer = null, scanning = false;
+    const stop = () => { clearTimeout(holdTimer); clearInterval(scanTimer); holdTimer = scanTimer = null; };
+    btn.addEventListener('pointerdown', (e) => {
+      if (e.button !== undefined && e.button !== 0) return;
+      scanning = false;
+      holdTimer = setTimeout(() => { scanning = true; scanTimer = setInterval(() => skipBy(direction * 2), 120); }, 350);
+    });
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => btn.addEventListener(ev, stop));
+    btn.addEventListener('click', (e) => { if (scanning) { scanning = false; e.preventDefault(); return; } skipBy(direction * 10); });
+  }
+  const btnBack = document.getElementById('btnBack'), btnForward = document.getElementById('btnForward');
+  if (btnBack) wireSkipButton(btnBack, -1);
+  if (btnForward) wireSkipButton(btnForward, 1);
+
   document.addEventListener('keydown', (e) => {
-    if (e.code === 'Space' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+    const tag = e.target.tagName;
+    if (e.code === 'Space' && tag !== 'INPUT' && tag !== 'TEXTAREA') {
       e.preventDefault();
       togglePlayPause();
+      return;
     }
+    // arrow keys: only in the cleaning studio, and never while typing or using a slider / menu
+    if (currentWorkspaceView !== 'studio' || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.ctrlKey || e.metaKey || e.altKey) return;
+    const step = e.shiftKey ? 30 : 5;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); skipBy(-step); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); skipBy(step); }
+    else if (e.key === 'j' || e.key === 'J') { e.preventDefault(); skipBy(-10); }
+    else if (e.key === 'l' || e.key === 'L') { e.preventDefault(); skipBy(10); }
   });
 
   function togglePlayPause() {

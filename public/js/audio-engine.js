@@ -248,6 +248,26 @@ class AudioEngine {
   /**
    * Fast peak limiter (brick-wall style compressor) that stops boosted audio from clipping.
    */
+  /**
+   * Transfer curve of the soft clipper that sits after the limiter: untouched up to 0.7, then a smooth
+   * roll-off that tops out below full scale. A large volume boost can briefly overshoot the limiter
+   * (it has no look-ahead); this keeps those peaks round instead of hard-clipped.
+   */
+  static softClipCurve(n = 4097) {
+    const c = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const x = (i / (n - 1)) * 2 - 1, a = Math.abs(x), knee = 0.7, room = 0.25;
+      c[i] = Math.sign(x) * (a <= knee ? a : knee + room * Math.tanh((a - knee) / room));
+    }
+    return c;
+  }
+  static createSoftClipper(ctx) {
+    const sh = ctx.createWaveShaper();
+    sh.curve = AudioEngine.softClipCurve();
+    sh.oversample = '2x';
+    return sh;
+  }
+
   static createLimiter(ctx) {
     const lim = ctx.createDynamicsCompressor();
     lim.threshold.value = -1.0;
@@ -862,13 +882,15 @@ class AudioEngine {
     this.limiter = AudioEngine.createLimiter(this.audioContext);
     this.originalGain.connect(this.masterGain);
     this.cleanedGain.connect(this.masterGain);
+    this.softClip = AudioEngine.createSoftClipper(this.audioContext);
     this.masterGain.connect(this.limiter);
-    this.limiter.connect(this.audioContext.destination);
+    this.limiter.connect(this.softClip);
+    this.softClip.connect(this.audioContext.destination);
 
     // 9. Master Analyser for real-time output VU meter
     this.analyser = this.audioContext.createAnalyser();
     this.analyser.fftSize = 256;
-    this.limiter.connect(this.analyser);
+    this.softClip.connect(this.analyser);
 
     // Create GainNodes for each stem
     for (const def of this.componentDefs) {
@@ -1318,8 +1340,10 @@ class AudioEngine {
     eqM.connect(eqH);
     eqH.connect(comp);
     comp.connect(master);
+    const softClip = AudioEngine.createSoftClipper(offlineCtx);
     master.connect(limiter);
-    limiter.connect(offlineCtx.destination);
+    limiter.connect(softClip);
+    softClip.connect(offlineCtx.destination);
 
     progressCallback(useFull ? 0.85 : 0.5, "Applying EQ, compression and limiter...");
     const renderedBuffer = await offlineCtx.startRendering();

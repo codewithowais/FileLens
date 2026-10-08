@@ -2606,3 +2606,12 @@ body { font-size: 14.5px; line-height: 1.5; }
 .excerpt-controls { display: flex; align-items: center; gap: var(--s2); }
 .excerpt-controls label { font-size: .8rem; color: var(--text-muted); }
 .excerpt-input { width: 78px; background: var(--bg-input); color: var(--text-main); border: 1px solid var(--border-main); border-radius: var(--radius-sm); padding: 6px 8px; font-family: var(--font-mono); font-size: .86rem; text-align: center; }
+
+/* Rewind / fast-forward and volume boost */
+.btn-skip { position: relative; display: inline-flex; align-items: center; gap: 4px; width: auto; min-width: 44px; padding: 0 10px; }
+.btn-skip svg { width: 16px; height: 16px; }
+.skip-label { font-size: .72rem; font-weight: 700; font-family: var(--font-mono); }
+.btn-skip:active { transform: scale(.94); }
+.boost-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1); margin-top: var(--s3); }
+.boost-label { font-size: .74rem; color: var(--text-muted); margin-right: var(--s1); }
+.boost-row .btn-segmented { padding: 4px 10px; font-size: .76rem; }

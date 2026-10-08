@@ -87,6 +87,8 @@ class MockAudioBufferSourceNode extends MockAudioNode {
   }
 }
 
+class MockWaveShaperNode extends MockAudioNode { constructor() { super(); this.curve = null; this.oversample = 'none'; } }
+
 class MockAudioContext {
   constructor() {
     this.currentTime = 0;
@@ -97,6 +99,7 @@ class MockAudioContext {
   createBiquadFilter() { return new MockBiquadFilterNode(); }
   createDynamicsCompressor() { return new MockDynamicsCompressorNode(); }
   createAnalyser() { return new MockAnalyserNode(); }
+  createWaveShaper() { return new MockWaveShaperNode(); }
   createBufferSource() { return new MockAudioBufferSourceNode(); }
   resume() { return Promise.resolve(); }
 }
