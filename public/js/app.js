@@ -246,6 +246,8 @@ document.addEventListener('DOMContentLoaded', () => {
         await audioEngine.decodeAudio(bytes);
         if (currentFile !== file || (signal && signal.aborted)) return;
         // Long recordings: the studio previews a few minutes; the download covers all of it
+        // Judge the whole recording once, so every part of it gets the same automatic settings
+        try { audioEngine.recordingAnalysis = AudioEngine.analyzeRecording(audioEngine.fullBuffer || audioEngine.originalBuffer); } catch (e) { audioEngine.recordingAnalysis = null; console.warn('Recording analysis failed:', e); }
         audioEngine.setExcerpt(0, AudioEngine.MAX_PREVIEW_SECONDS);
         const audioBuf = audioEngine.originalBuffer;
 
@@ -723,6 +725,7 @@ document.addEventListener('DOMContentLoaded', () => {
     studioPromise = null;
     pendingAudioBytes = null;
     audioEngine.stems = {};
+    audioEngine.recordingAnalysis = null;
     showProgress(0.1, "Reading file…", `Reading ${file.name}`);
 
     try {
@@ -2308,33 +2311,30 @@ document.addEventListener('DOMContentLoaded', () => {
   // ✨ 1-Click Auto Clean
   // ==========================================================================
   function applyAutoCleanUi(announce) {
-    audioEngine.applyAutoClean();
+    const rec = audioEngine.applyAutoClean();
+    const set = (el, lbl, v, text) => { if (el) el.value = v; if (lbl) lbl.textContent = text; };
+    const db = (v) => (v > 0 ? '+' : '') + v.toFixed(1) + ' dB';
 
     // Synchronize Macro Sliders
-    if (slNoiseReduction) { slNoiseReduction.value = 85; lblNoiseReduction.textContent = '85%'; }
-    if (slVoiceBoost) { slVoiceBoost.value = 35; lblVoiceBoost.textContent = '35%'; }
-    if (slBgPreserve) { slBgPreserve.value = 100; lblBgPreserve.textContent = '100%'; }
+    set(slNoiseReduction, lblNoiseReduction, rec.noiseReduction, rec.noiseReduction + '%');
+    set(slVoiceBoost, lblVoiceBoost, rec.voiceBoost, rec.voiceBoost + '%');
+    set(slBgPreserve, lblBgPreserve, rec.bgPreserve, rec.bgPreserve + '%');
+    set(slMasterVol, lblMasterVol, rec.masterVolume, db(rec.masterVolume));
+    document.querySelectorAll('#groupBoost .btn-segmented').forEach(b => b.classList.toggle('active', parseFloat(b.dataset.boost) === rec.masterVolume));
 
     // Synchronize Pro DSP Rack
-    if (slDeReverb) { slDeReverb.value = 20; lblDeReverb.textContent = '20%'; }
-    if (slDeEsser) { slDeEsser.value = 25; lblDeEsser.textContent = '25%'; }
-    if (eqLow) { eqLow.value = 0; lblEqLow.textContent = '0 dB'; }
-    if (eqMid) { eqMid.value = 1.5; lblEqMid.textContent = '+1.5 dB'; }
-    if (eqHigh) { eqHigh.value = 0.5; lblEqHigh.textContent = '+0.5 dB'; }
+    set(slDeReverb, lblDeReverb, rec.deReverb, rec.deReverb + '%');
+    set(slDeEsser, lblDeEsser, rec.deEsser, rec.deEsser + '%');
+    set(eqLow, lblEqLow, rec.eq[0], db(rec.eq[0]));
+    set(eqMid, lblEqMid, rec.eq[1], db(rec.eq[1]));
+    set(eqHigh, lblEqHigh, rec.eq[2], db(rec.eq[2]));
 
-    if (groupDeHum) {
-      groupDeHum.querySelectorAll('.btn-segmented').forEach(b => {
-        b.classList.toggle('active', b.dataset.dehum === '60hz');
-      });
-      if (lblDeHum) lblDeHum.textContent = '60 Hz (Active)';
-    }
+    const humMode = rec.humHz === 50 ? '50hz' : rec.humHz === 60 ? '60hz' : 'off';
+    if (groupDeHum) groupDeHum.querySelectorAll('.btn-segmented').forEach(b => b.classList.toggle('active', b.dataset.dehum === humMode));
+    if (lblDeHum) lblDeHum.textContent = humMode === 'off' ? 'Off' : `${rec.humHz} Hz (Active)`;
 
-    if (groupHighPass) {
-      groupHighPass.querySelectorAll('.btn-segmented').forEach(b => {
-        b.classList.toggle('active', b.dataset.hp === '40');
-      });
-      if (lblHighPass) lblHighPass.textContent = '40 Hz (Standard)';
-    }
+    if (groupHighPass) groupHighPass.querySelectorAll('.btn-segmented').forEach(b => b.classList.toggle('active', b.dataset.hp === String(rec.highPass)));
+    if (lblHighPass) lblHighPass.textContent = rec.highPass === 80 ? '80 Hz (Vocal Clean)' : '40 Hz (Standard)';
 
     syncPresetUi('cafe_preserve_voices');
     syncMixerUiFromEngine();
@@ -2342,7 +2342,8 @@ document.addEventListener('DOMContentLoaded', () => {
     updateFinalStatusDashboard();
     updateProcessedWaveformPreviewDebounced();
     if (announce) {
-  showToast("✨ 1-Click Auto Clean applied: Speech clarity boosted, noise removed & background voices preserved!", "success", 4000);
+      const why = rec.notes.length ? ` (${rec.notes.join(', ')})` : '';
+      showToast(`✨ Auto clean applied for this recording${why}. Background voices are kept.`, 'success', 5000);
     }
   }
 

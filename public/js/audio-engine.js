@@ -1048,13 +1048,106 @@ class AudioEngine {
     this.cleanAlgorithm = algo;
   }
 
-  applyAutoClean() {
-    this.applyPreset('cafe_preserve_voices');
-    this.setDeHum('60hz');
-    this.setHighPassFilter(40);
-    this.setDeEsser(25);
-    this.setDeReverb(20);
-    this.setEQ(0, 1.5, 0.5);
+  /**
+   * Listens to the WHOLE recording (sampled, so it takes a fraction of a second even for hours of audio)
+   * and measures what the automatic clean needs to know: how noisy it is, whether there is mains hum
+   * (50 or 60 Hz), how much low rumble and sibilance there is, and how loud the speech is.
+   */
+  static analyzeRecording(buffer) {
+    const sr = buffer.sampleRate, n = buffer.length, nc = buffer.numberOfChannels;
+    const L = buffer.getChannelData(0), R = nc > 1 ? buffer.getChannelData(1) : L;
+    const out = { humHz: 0, humDb: 0, snrDb: 30, speechDb: -30, noiseDb: -60, sibilanceDb: -20, rumbleDb: -30, valid: false };
+    if (n < sr) return out;                                    // under a second: not enough to judge
+
+    // ---- Loudness, noise level, rumble and sibilance from up to 600 evenly spaced frames ----
+    const { fftSize } = AudioEngine.STFT, half = fftSize / 2, win = AudioEngine.hannWindow(), fft = new FastFFT(fftSize);
+    const real = new Float32Array(fftSize), imag = new Float32Array(fftSize);
+    const bin = (hz) => Math.max(1, Math.min(half - 1, Math.round(hz * fftSize / sr)));
+    const lo1 = bin(80), sp0 = bin(300), sp1 = bin(3400), sb0 = bin(5000), sb1 = Math.min(half - 1, bin(9000));
+    const frames = Math.min(600, Math.floor((n - fftSize) / fftSize));
+    const fr = [];
+    for (let f = 0; f < frames; f++) {
+      const off = Math.floor(f * (n - fftSize) / Math.max(1, frames - 1));
+      let sum = 0;
+      for (let i = 0; i < fftSize; i++) { const v = nc > 1 ? 0.5 * (L[off + i] + R[off + i]) : L[off + i]; sum += v * v; real[i] = v * win[i]; imag[i] = 0; }
+      fft.transform(real, imag);
+      let eLow = 0, eSp = 0, eSib = 0;
+      for (let k = 1; k < lo1; k++) eLow += real[k] * real[k] + imag[k] * imag[k];
+      for (let k = sp0; k <= sp1; k++) eSp += real[k] * real[k] + imag[k] * imag[k];
+      for (let k = sb0; k <= sb1; k++) eSib += real[k] * real[k] + imag[k] * imag[k];
+      fr.push({ db: 10 * Math.log10(sum / fftSize + 1e-12), eLow, eSp, eSib });
+    }
+    if (fr.length < 20) return out;
+    const sorted = fr.map(x => x.db).sort((a, b) => a - b);
+    const pct = (p) => sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
+    out.noiseDb = pct(0.10); out.speechDb = pct(0.90);
+    out.snrDb = Math.max(0, out.speechDb - out.noiseDb);
+    const loud = fr.filter(x => x.db >= pct(0.7));
+    const sum = (arr, key) => arr.reduce((a, x) => a + x[key], 0);
+    const dB = (a, b) => 10 * Math.log10((a + 1e-20) / (b + 1e-20));
+    out.sibilanceDb = dB(sum(loud, 'eSib'), sum(loud, 'eSp'));
+    out.rumbleDb = dB(sum(fr, 'eLow'), sum(fr, 'eSp'));
+
+    // ---- Mains hum: look for a steady tone at 50/60 Hz (+ harmonics) in the quietest stretches ----
+    const D = Math.max(1, Math.floor(sr / 1000)), nd = Math.floor(n / D), rate = sr / D;
+    const x = new Float32Array(nd);
+    for (let i = 0; i < nd; i++) { let a = 0; const o = i * D; for (let j = 0; j < D; j += 2) a += nc > 1 ? 0.5 * (L[o + j] + R[o + j]) : L[o + j]; x[i] = a / Math.ceil(D / 2); }
+    const W = Math.floor(rate * 4);
+    if (nd >= W * 2) {
+      const wins = [];
+      for (let o = 0; o + W <= nd; o += W) { let e = 0; for (let i = o; i < o + W; i++) e += x[i] * x[i]; wins.push({ o, e }); }
+      wins.sort((a, b) => a.e - b.e);
+      const chosen = wins.slice(0, Math.min(6, wins.length));
+      const goertzel = (o, hz) => {
+        const w = 2 * Math.PI * hz / rate, c = 2 * Math.cos(w); let s1 = 0, s2 = 0;
+        for (let i = 0; i < W; i++) { const h = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (W - 1)); const s0 = x[o + i] * h + c * s1 - s2; s2 = s1; s1 = s0; }
+        return s1 * s1 + s2 * s2 - c * s1 * s2;
+      };
+      const med = (a) => { const b = a.slice().sort((p, q) => p - q); return b[Math.floor(b.length / 2)]; };
+      for (const f0 of [50, 60]) {
+        const per = [1, 2, 3].map(h => med(chosen.map(c => 10 * Math.log10((goertzel(c.o, f0 * h) + 1e-20) / (0.5 * (goertzel(c.o, f0 * h - 5) + goertzel(c.o, f0 * h + 5)) + 1e-20)))));
+        const score = (per[0] + per[1] + per[2]) / 3, strong = per.filter(v => v >= 5).length;
+        if (score >= 7 && per[0] >= 5 && strong >= 2 && score > out.humDb) { out.humDb = score; out.humHz = f0; }
+      }
+    }
+    out.valid = true;
+    return out;
+  }
+
+  /** Turns a recording analysis into settings. Without one, a safe general-purpose clean is used. */
+  recommendAutoClean(a = this.recordingAnalysis) {
+    const rec = { noiseReduction: 85, voiceBoost: 35, bgPreserve: 100, deReverb: 20, deEsser: 25, humHz: 60, highPass: 40,
+      eq: [0, 1.5, 0.5], masterVolume: 0, notes: [] };
+    if (!a || !a.valid) return rec;
+    // How hard to clean depends on how noisy the recording is: gentle on clean audio, firmer on noisy audio
+    rec.noiseReduction = Math.max(35, Math.min(90, Math.round(95 - (a.snrDb - 5) * 1.5)));
+    rec.notes.push(a.snrDb >= 35 ? 'clean recording, light noise reduction' : a.snrDb >= 20 ? 'moderate background noise' : 'noisy recording, stronger noise reduction');
+    rec.humHz = a.humHz;                                   // 0 = no hum found, leave the notch off
+    if (a.humHz) rec.notes.push(`${a.humHz} Hz hum removed`);
+    rec.highPass = a.rumbleDb > -12 ? 80 : 40;
+    if (rec.highPass === 80) rec.notes.push('low rumble cut');
+    rec.deEsser = a.sibilanceDb > -12 ? 40 : a.sibilanceDb > -16 ? 25 : 10;
+    rec.deReverb = a.snrDb < 20 ? 25 : 20;
+    // Bring quiet speech up to a comfortable level (never turns loud recordings down)
+    rec.masterVolume = Math.max(0, Math.min(15, Math.round((-20 - a.speechDb) * 2) / 2));
+    if (rec.masterVolume >= 1) rec.notes.push(`volume +${rec.masterVolume} dB`);
+    return rec;
+  }
+
+  /** One-click clean: applies the settings recommended for this recording and returns them. */
+  applyAutoClean(rec = this.recommendAutoClean()) {
+    this.applyPreset('reset_unity');
+    this.applyMacros(rec.noiseReduction, rec.voiceBoost, rec.bgPreserve);
+    this.setStemGain('music', -12 * Math.min(1, rec.noiseReduction / 85));
+    if (rec.humHz) this.setStemGain('hum', -40);
+    this.setDeHum(rec.humHz === 50 ? '50hz' : rec.humHz === 60 ? '60hz' : 'off');
+    this.setHighPassFilter(rec.highPass);
+    this.setDeEsser(rec.deEsser);
+    this.setDeReverb(rec.deReverb);
+    this.setEQ(rec.eq[0], rec.eq[1], rec.eq[2]);
+    this.setMasterVolume(rec.masterVolume);
+    this.updateAllStemGains();
+    return rec;
   }
 
   /**
