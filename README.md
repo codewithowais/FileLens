@@ -12,7 +12,7 @@ FileLens is a free, private file inspector that runs entirely in your browser. D
 
 Nothing is uploaded. Your files are analysed on your own device.
 
-> Live: https://filelens-rho.vercel.app
+> Live: https://filelens-app.vercel.app
 
 ---
 
