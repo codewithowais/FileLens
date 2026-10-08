@@ -279,6 +279,7 @@ class AudioEngine {
   }
 
   static get MAX_PREVIEW_SECONDS() { return 180; }
+  static get COMPONENT_IDS() { return ['main_voice', 'bg_voice', 'traffic', 'wind', 'fan_ac', 'hum', 'music', 'noise', 'reverb']; }
   /**
    * De-hum filter settings. When de-hum is off the filter must be a true bypass: an all-pass filter.
    * (A notch with a tiny Q is NOT a bypass: it removes almost the whole spectrum.)
@@ -533,6 +534,128 @@ class AudioEngine {
     return target;
   }
 
+  static get WARMUP_FRAMES() { return 16; }
+
+  /** How many parallel segments to split `numFrames` into (1 = no splitting). */
+  planSegments(numFrames) {
+    if (this.segmentCount) return Math.max(1, Math.min(this.segmentCount, numFrames));
+    if (numFrames < 1500) return 1; // under ~17 s: splitting is not worth it
+    const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
+    const canWork = typeof Worker !== 'undefined' && this.useWorkers !== false;
+    return canWork ? Math.max(1, Math.min(8, cores)) : 1;
+  }
+
+  /**
+   * Runs `count` synthesis jobs: on workers when available (falling back to the main thread if the
+   * workers fail to start), otherwise one after another on the main thread.
+   */
+  async runSegments(count, jobFor, merge, onProgress, abortSignal) {
+    const useWorkers = count > 1 && typeof Worker !== 'undefined' && this.useWorkers !== false;
+    if (useWorkers) {
+      try { await this.runSegmentsOnWorkers(count, jobFor, merge, onProgress, abortSignal); return; }
+      catch (err) { if (err && err.name === 'AbortError') throw err; console.warn('Workers unavailable, using the main thread:', err); this.useWorkers = false; }
+    }
+    for (let g = 0; g < count; g++) {
+      if (abortSignal && abortSignal.aborted) throw AudioEngine.abortError();
+      const res = await AudioEngine.synthSegment(jobFor(g), (p) => onProgress(g, p), abortSignal, true);
+      merge(res); onProgress(g, 1);
+    }
+  }
+
+  runSegmentsOnWorkers(count, jobFor, merge, onProgress, abortSignal) {
+    return new Promise((resolve, reject) => {
+      const workers = []; let pending = count, done = false;
+      const finish = (err) => {
+        if (done) return; done = true;
+        workers.forEach(w => { try { w.terminate(); } catch (e) {} });
+        if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
+        err ? reject(err) : resolve();
+      };
+      const onAbort = () => finish(AudioEngine.abortError());
+      if (abortSignal) { if (abortSignal.aborted) return finish(AudioEngine.abortError()); abortSignal.addEventListener('abort', onAbort); }
+      try {
+        for (let g = 0; g < count; g++) {
+          const w = new Worker(AudioEngine.workerUrl || 'js/stem-worker.js'); workers.push(w);
+          w.onerror = (e) => finish(new Error((e && e.message) || 'worker failed'));
+          w.onmessage = (e) => {
+            const m = e.data;
+            if (m.progress !== undefined) { onProgress(g, m.progress); return; }
+            if (m.error) { finish(new Error(m.error)); return; }
+            try { merge(m.result); } catch (err) { finish(err); return; }
+            onProgress(g, 1);
+            if (--pending === 0) finish();
+          };
+          const job = jobFor(g);
+          const transfer = [job.left.buffer]; if (job.right) transfer.push(job.right.buffer);
+          w.postMessage(job, transfer);
+        }
+      } catch (err) { finish(err); }
+    });
+  }
+
+  /**
+   * Masks and re-synthesizes `nFrames` consecutive STFT frames of one segment. Pure function of its
+   * input, so it can run on the main thread or inside a worker. The first `warm` frames only prime the
+   * mask smoothing and are not written out (they belong to the previous segment).
+   * Stems whose mask is essentially zero in a frame are skipped (no inverse FFT needed).
+   */
+  static async synthSegment(job, onProgress, abortSignal, yieldOften) {
+    const { left, right, isStereo, sampleRate, noiseFloor, warm, nFrames } = job;
+    const { fftSize, hopSize } = AudioEngine.STFT, halfFft = fftSize / 2;
+    const stemIds = AudioEngine.COMPONENT_IDS, numStems = stemIds.length;
+    const window = AudioEngine.hannWindow();
+    const outStart = warm * hopSize, outLen = (nFrames - 1) * hopSize + fftSize - outStart;
+    const stemL = [], stemR = [];
+    for (let s = 0; s < numStems; s++) { stemL.push(new Float32Array(outLen)); stemR.push(new Float32Array(outLen)); }
+    const windowSum = new Float32Array(outLen), energy = new Float64Array(numStems);
+    const masker = new StemMasker(sampleRate, fftSize, stemIds), fft = new FastFFT(fftSize);
+    const real = new Float32Array(fftSize), imag = new Float32Array(fftSize);
+    const origR = new Float32Array(fftSize), origI = new Float32Array(fftSize);
+    const stemReal = new Float32Array(fftSize), stemImag = new Float32Array(fftSize);
+    const mag = new Float32Array(halfFft);
+    const kSpeech0 = Math.ceil(300 * fftSize / sampleRate), kSpeech1 = Math.floor(3400 * fftSize / sampleRate);
+    const right2 = isStereo ? right : left;
+    let lastYield = AudioEngine.now(), lastReport = 0;
+    for (let f = 0; f < nFrames; f++) {
+      if (abortSignal && abortSignal.aborted) throw AudioEngine.abortError();
+      if (yieldOften && AudioEngine.now() - lastYield > 20) { await yieldToUI(); lastYield = AudioEngine.now(); if (onProgress) onProgress(f / nFrames); }
+      else if (!yieldOften && onProgress && f - lastReport >= 400) { lastReport = f; onProgress(f / nFrames); }
+      const offset = f * hopSize;
+      // One complex FFT carries both channels (L in real part, R in imaginary part)
+      for (let i = 0; i < fftSize; i++) { real[i] = left[offset + i] * window[i]; imag[i] = isStereo ? right2[offset + i] * window[i] : 0; }
+      fft.transform(real, imag);
+      for (let i = 0; i < fftSize; i++) { origR[i] = real[i]; origI[i] = imag[i]; }
+      AudioEngine.midMagnitudes(origR, origI, fftSize, isStereo, mag);
+      let vocal = 0, total = 0;
+      for (let k = 0; k < halfFft; k++) { total += mag[k]; if (k >= kSpeech0 && k <= kSpeech1) vocal += mag[k]; }
+      const masks = masker.compute(mag, noiseFloor, total > 0 ? vocal / total : 0, f >= warm ? energy : null);
+      if (f < warm) continue;
+      const o = offset - outStart;
+      // Synthesize each stem: a real-valued mask is symmetric, so masking Z = L + jR and
+      // inverse-transforming returns the stem's left channel (real) and right channel (imag).
+      for (let s = 0; s < numStems; s++) {
+        const mask = masks[s];
+        let peak = 0; for (let k = 0; k < halfFft; k++) if (mask[k] > peak) peak = mask[k];
+        if (peak < 1e-5) continue;
+        stemReal[0] = origR[0] * mask[0]; stemImag[0] = origI[0] * mask[0];
+        for (let k = 1; k < halfFft; k++) {
+          const w = mask[k];
+          stemReal[k] = origR[k] * w; stemImag[k] = origI[k] * w;
+          stemReal[fftSize - k] = origR[fftSize - k] * w; stemImag[fftSize - k] = origI[fftSize - k] * w;
+        }
+        stemReal[halfFft] = origR[halfFft] * mask[halfFft - 1]; stemImag[halfFft] = origI[halfFft] * mask[halfFft - 1];
+        fft.inverseTransform(stemReal, stemImag);
+        const tl = stemL[s], tr = stemR[s];
+        for (let i = 0; i < fftSize; i++) {
+          tl[o + i] += stemReal[i] * window[i];
+          if (isStereo) tr[o + i] += stemImag[i] * window[i];
+        }
+      }
+      for (let i = 0; i < fftSize; i++) windowSum[o + i] += window[i] * window[i];
+    }
+    return { stemL, stemR, windowSum, energy, sampleStart: job.sampleStart };
+  }
+
   /**
    * Runs the AI Spectral Decomposition into 9 Estimated Components.
    * Uses Fast STFT analysis and psychoacoustic spectral masking.
@@ -572,54 +695,32 @@ class AudioEngine {
     const stemLeftArr = stemIds.map(id => stemLeft[id]);
     const stemRightArr = stemIds.map(id => stemRight[id]);
     const energyAccumArr = new Float64Array(numStems);
-
-    const masker = new StemMasker(sampleRate, fftSize, stemIds);
-    const fft = new FastFFT(fftSize);
-    const real = new Float32Array(fftSize), imag = new Float32Array(fftSize);
-    const origSpecReal = new Float32Array(fftSize), origSpecImag = new Float32Array(fftSize);
-    const stemReal = new Float32Array(fftSize), stemImag = new Float32Array(fftSize);
-    const mag = new Float32Array(halfFft);
     const windowSum = new Float32Array(numSamples);
-    let lastYield = AudioEngine.now();
 
-    // Pass 2: multi-component spectral masking and inverse STFT synthesis
-    for (let frameIdx = 0; frameIdx < numFrames; frameIdx++) {
-      if (abortSignal && abortSignal.aborted) throw AudioEngine.abortError();
-      if (AudioEngine.now() - lastYield > 20) {
-        await yieldToUI(); lastYield = AudioEngine.now();
-        progressCallback(0.4 + 0.5 * (frameIdx / numFrames), "AI Stem Separation: Synthesizing 9 Component Channels...");
-      }
-      const offset = frameIdx * hopSize;
-      // One complex FFT carries both channels (L in real part, R in imaginary part)
-      for (let i = 0; i < fftSize; i++) { real[i] = inputLeft[offset + i] * window[i]; imag[i] = isStereo ? inputRight[offset + i] * window[i] : 0; }
-      fft.transform(real, imag);
-      for (let i = 0; i < fftSize; i++) { origSpecReal[i] = real[i]; origSpecImag[i] = imag[i]; }
-      AudioEngine.midMagnitudes(origSpecReal, origSpecImag, fftSize, isStereo, mag);
-
-      let vocal = 0, total = 0;
-      for (let k = 0; k < halfFft; k++) { total += mag[k]; if (k >= kSpeech0 && k <= kSpeech1) vocal += mag[k]; }
-      const stemMasks = masker.compute(mag, noiseFloor, total > 0 ? vocal / total : 0, energyAccumArr);
-
-      // Synthesize each stem: a real-valued mask is symmetric, so masking Z = L + jR and
-      // inverse-transforming returns the stem's left channel (real) and right channel (imag).
+    // Pass 2: multi-component spectral masking and inverse STFT synthesis. The frames are split into
+    // segments that run in parallel on background workers (or one after another when workers are
+    // unavailable); each segment's output is added into the stems where they overlap.
+    const segCount = this.planSegments(numFrames);
+    const bounds = [];
+    for (let g = 0; g < segCount; g++) bounds.push([Math.floor(numFrames * g / segCount), Math.floor(numFrames * (g + 1) / segCount)]);
+    const segProgress = new Array(segCount).fill(0);
+    const reportProgress = () => progressCallback(0.4 + 0.5 * (segProgress.reduce((a, b) => a + b, 0) / segCount), "AI Stem Separation: Synthesizing 9 Component Channels...");
+    const merge = (res) => {
       for (let s = 0; s < numStems; s++) {
-        const mask = stemMasks[s];
-        stemReal[0] = origSpecReal[0] * mask[0]; stemImag[0] = origSpecImag[0] * mask[0];
-        for (let k = 1; k < halfFft; k++) {
-          const w = mask[k];
-          stemReal[k] = origSpecReal[k] * w; stemImag[k] = origSpecImag[k] * w;
-          stemReal[fftSize - k] = origSpecReal[fftSize - k] * w; stemImag[fftSize - k] = origSpecImag[fftSize - k] * w;
-        }
-        stemReal[halfFft] = origSpecReal[halfFft] * mask[halfFft - 1]; stemImag[halfFft] = origSpecImag[halfFft] * mask[halfFft - 1];
-        fft.inverseTransform(stemReal, stemImag);
-        const targetL = stemLeftArr[s], targetR = stemRightArr[s];
-        for (let i = 0; i < fftSize; i++) {
-          targetL[offset + i] += stemReal[i] * window[i];
-          if (isStereo) targetR[offset + i] += stemImag[i] * window[i];
-        }
+        const dl = stemLeftArr[s], dr = stemRightArr[s], sl = res.stemL[s], sr = res.stemR[s];
+        for (let i = 0, o = res.sampleStart; i < sl.length; i++, o++) { dl[o] += sl[i]; dr[o] += sr[i]; }
+        energyAccumArr[s] += res.energy[s];
       }
-      for (let i = 0; i < fftSize; i++) windowSum[offset + i] += window[i] * window[i];
-    }
+      for (let i = 0, o = res.sampleStart; i < res.windowSum.length; i++, o++) windowSum[o] += res.windowSum[i];
+    };
+    const jobFor = (g) => {
+      const warm = g === 0 ? 0 : AudioEngine.WARMUP_FRAMES;
+      const f0 = bounds[g][0] - warm, f1 = bounds[g][1];
+      const a = f0 * hopSize, b = (f1 - 1) * hopSize + fftSize;
+      return { left: inputLeft.slice(a, b), right: isStereo ? inputRight.slice(a, b) : null, isStereo, sampleRate, noiseFloor,
+        warm, nFrames: f1 - f0, sampleStart: a + warm * hopSize };
+    };
+    await this.runSegments(segCount, jobFor, merge, (g, p) => { segProgress[g] = p; reportProgress(); }, abortSignal);
 
     // Normalize overlap-add by window sum
     for (let i = 0; i < numSamples; i++) {
