@@ -129,17 +129,26 @@ class StemMasker {
       const f = freqHz[k], m = mag[k];
       const baseline = noiseFloor[k] || 1e-5;
       const snr = m / (baseline + 1e-6);
+      const voicedBin = vocalProminence > 0.40 && snr > 2.2;
 
       if (f < 35) stemMasks[IDX.traffic][k] = 0.92;                                                   // sub-bass rumble
       if (isHumBin[k] && snr > 1.8) stemMasks[IDX.hum][k] = 0.88;                                       // mains hum
-      if (f >= 35 && f <= 220 && !stemMasks[IDX.hum][k]) stemMasks[IDX.traffic][k] = Math.min(1.0, (220 - f) / 180) * 0.78;
+      if (f >= 35 && f <= 220 && !stemMasks[IDX.hum][k]) {
+        // Rumble sits in these bins, but so do a voice's lowest harmonics: where the voice stands clearly above
+        // the noise floor, mostly leave them to the voice so it keeps its body
+        stemMasks[IDX.traffic][k] = Math.min(1.0, (220 - f) / 180) * (voicedBin ? 0.25 : 0.78);
+      }
       if (f >= 30 && f <= 380) stemMasks[IDX.wind][k] = 0.28 * (1.0 - Math.min(1.0, snr / 10.0));
       if (f >= 200 && f <= 5500) stemMasks[IDX.fan][k] = Math.min(1.0, baseline / (m + 1e-6)) * 0.70;
       if (f > 4000) stemMasks[IDX.noise][k] = Math.min(1.0, baseline / (m + 1e-6)) * 0.75;
 
       const isPeak = k > 1 && k < halfFft - 1 && m > mag[k - 1] && m > mag[k + 1];
+      // A voice is not only the 300-3400 Hz band: its low harmonics (down to ~85 Hz) give it body and its
+      // sibilants and air (up to ~10 kHz) give it clarity. Where it stands clearly above the noise floor it
+      // keeps those bins too, otherwise they would be handed to the noise stems and cut away.
+      if (voicedBin && (f < 280 || f > 3800) && f >= 85 && f <= 10000) { stemMasks[IDX.main][k] = 0.70; stemMasks[IDX.bg][k] = 0.05; }
       if (f >= 280 && f <= 3800) {
-        if (vocalProminence > 0.40 && snr > 2.2) { stemMasks[IDX.main][k] = isPeak ? 0.90 : 0.78; stemMasks[IDX.bg][k] = isPeak ? 0.06 : 0.14; }
+        if (voicedBin) { stemMasks[IDX.main][k] = isPeak ? 0.90 : 0.78; stemMasks[IDX.bg][k] = isPeak ? 0.06 : 0.14; }
         else if (vocalProminence > 0.20 || (snr > 1.15 && snr <= 2.2)) { stemMasks[IDX.main][k] = 0.16; stemMasks[IDX.bg][k] = 0.74; }
       }
       if (f >= 500 && f <= 8000 && snr > 3.0 && vocalProminence < 0.35) stemMasks[IDX.music][k] = 0.65;
@@ -325,6 +334,27 @@ class AudioEngine {
     return this.audioContext;
   }
 
+  /**
+   * Makes the audio context run at the recording's own sample rate (clamped to 16-48 kHz). The browser resamples
+   * everything it decodes to the context rate, so a 22 kHz voice memo would otherwise be inflated to 48 kHz:
+   * slower to decode and more than twice the samples to analyse.
+   */
+  useContextRate(rate) {
+    const target = Math.max(16000, Math.min(48000, Math.round(rate || 0)));
+    if (!rate || (this.audioContext && this.audioContext.sampleRate === target)) return;
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    let ctx;
+    try { ctx = new AudioContextClass({ sampleRate: target }); } catch (e) { return; }   // unsupported: keep the default
+    if (this.audioContext) {
+      this.stopSources();
+      try { this.audioContext.close(); } catch (e) {}
+      this.isGraphSetup = false; this.stemGains = {};                                    // the old graph belonged to the old context
+      this.analyser = null; this.masterGain = null; this.originalGain = null; this.cleanedGain = null;
+    }
+    this.audioContext = ctx;
+  }
+
   async resumeAudioContextIfNeeded() {
     if (this.audioContext && this.audioContext.state === 'suspended') {
       try {
@@ -338,7 +368,8 @@ class AudioEngine {
   /**
    * Decodes an ArrayBuffer (from uploaded file) into an AudioBuffer.
    */
-  async decodeAudio(arrayBuffer) {
+  async decodeAudio(arrayBuffer, sampleRateHint = 0) {
+    if (sampleRateHint) this.useContextRate(sampleRateHint);
     this.initAudioContext();
     // Clone array buffer because decodeAudioData detaches it
     const bufferCopy = arrayBuffer.slice(0);
@@ -415,7 +446,7 @@ class AudioEngine {
 
   /**
    * Learns the steady background level of every frequency: the level it sits at during its quietest
-   * ~15% of frames. Frames are sampled evenly across the WHOLE recording (at most ~12,000 of them),
+   * ~15% of frames. Frames are sampled evenly across the WHOLE recording (at most ~4,000 of them),
    * so the result does not depend on how long the recording is and costs about a second.
    */
   async learnNoiseStatistics(left, right, isStereo, sampleRate, progress, abortSignal) {
@@ -427,7 +458,7 @@ class AudioEngine {
     const real = new Float32Array(fftSize), imag = new Float32Array(fftSize);
     const LOG_MIN = -6, BPD = 12, NB = 120;                       // 10 decades of magnitude, 12 bins each
     const hist = new Uint32Array(halfFft * NB);
-    const stride = Math.max(1, Math.floor(numFrames / 12000));
+    const stride = Math.max(1, Math.floor(numFrames / 4000));
     let used = 0, lastYield = AudioEngine.now();
     for (let f = 0; f < numFrames; f += stride) {
       if (abortSignal && abortSignal.aborted) throw AudioEngine.abortError();
@@ -606,7 +637,7 @@ class AudioEngine {
     const window = AudioEngine.hannWindow();
     const outStart = warm * hopSize, outLen = (nFrames - 1) * hopSize + fftSize - outStart;
     const stemL = [], stemR = [];
-    for (let s = 0; s < numStems; s++) { stemL.push(new Float32Array(outLen)); stemR.push(new Float32Array(outLen)); }
+    for (let s = 0; s < numStems; s++) { stemL.push(new Float32Array(outLen)); stemR.push(isStereo ? new Float32Array(outLen) : new Float32Array(0)); }
     const windowSum = new Float32Array(outLen), energy = new Float64Array(numStems);
     const masker = new StemMasker(sampleRate, fftSize, stemIds), fft = new FastFFT(fftSize);
     const real = new Float32Array(fftSize), imag = new Float32Array(fftSize);
@@ -680,20 +711,21 @@ class AudioEngine {
     const stemIds = this.componentDefs.map(c => c.id);
     const numStems = stemIds.length;
 
+    const tStart = AudioEngine.now();
     // Pass 1: learn the background noise from the WHOLE recording (not just the preview window)
     const { noiseFloor } = await this.getNoiseStats(this.fullBuffer || this.originalBuffer,
       (p) => progressCallback(0.1 + 0.3 * p, "AI Spectral Modeling: Estimating Acoustic Floors & Formants..."), abortSignal);
-    const kSpeech0 = Math.ceil(300 * fftSize / sampleRate), kSpeech1 = Math.floor(3400 * fftSize / sampleRate);
+    const tNoise = AudioEngine.now();
 
     // Stems are written straight into AudioBuffers (no second copy in memory)
     const stemBuffers = {}, stemLeft = {}, stemRight = {};
     for (const id of stemIds) {
-      stemBuffers[id] = this.audioContext.createBuffer(2, numSamples, sampleRate);
+      stemBuffers[id] = this.audioContext.createBuffer(isStereo ? 2 : 1, numSamples, sampleRate);   // mono stays mono: half the memory and work
       stemLeft[id] = stemBuffers[id].getChannelData(0);
-      stemRight[id] = stemBuffers[id].getChannelData(1);
+      stemRight[id] = isStereo ? stemBuffers[id].getChannelData(1) : null;
     }
     const stemLeftArr = stemIds.map(id => stemLeft[id]);
-    const stemRightArr = stemIds.map(id => stemRight[id]);
+    const stemRightArr = stemIds.map(id => stemRight[id]);   // null entries for mono
     const energyAccumArr = new Float64Array(numStems);
     const windowSum = new Float32Array(numSamples);
 
@@ -708,7 +740,8 @@ class AudioEngine {
     const merge = (res) => {
       for (let s = 0; s < numStems; s++) {
         const dl = stemLeftArr[s], dr = stemRightArr[s], sl = res.stemL[s], sr = res.stemR[s];
-        for (let i = 0, o = res.sampleStart; i < sl.length; i++, o++) { dl[o] += sl[i]; dr[o] += sr[i]; }
+        for (let i = 0, o = res.sampleStart; i < sl.length; i++, o++) dl[o] += sl[i];
+        if (isStereo) for (let i = 0, o = res.sampleStart; i < sr.length; i++, o++) dr[o] += sr[i];
         energyAccumArr[s] += res.energy[s];
       }
       for (let i = 0, o = res.sampleStart; i < res.windowSum.length; i++, o++) windowSum[o] += res.windowSum[i];
@@ -722,12 +755,12 @@ class AudioEngine {
     };
     await this.runSegments(segCount, jobFor, merge, (g, p) => { segProgress[g] = p; reportProgress(); }, abortSignal);
 
+    const tSynth = AudioEngine.now();
     // Normalize overlap-add by window sum
     for (let i = 0; i < numSamples; i++) {
       const norm = windowSum[i] > 1e-4 ? 1.0 / windowSum[i] : 1.0;
-      for (let s = 0; s < numStems; s++) { stemLeftArr[s][i] *= norm; stemRightArr[s][i] *= norm; }
+      for (let s = 0; s < numStems; s++) { stemLeftArr[s][i] *= norm; if (isStereo) stemRightArr[s][i] *= norm; }
     }
-    if (!isStereo) for (const id of stemIds) stemRight[id].set(stemLeft[id]);
 
     // Energy percentages for UI display
     let totalAllEnergy = 0;
@@ -737,6 +770,8 @@ class AudioEngine {
       this.stems[id] = stemBuffers[id];
       this.stemValues[id] = 1.0; this.stemMutes[id] = false; this.stemSolos[id] = false;
     }
+    const tEnd = AudioEngine.now();
+    this.timings = { noiseStatsMs: Math.round(tNoise - tStart), synthMs: Math.round(tSynth - tNoise), finishMs: Math.round(tEnd - tSynth), segments: segCount };
     progressCallback(1.0, "AI Decomposition Complete: 9 Component Layers Isolated.");
     return { stems: this.stems, energy: this.componentEnergy };
   }
@@ -1114,22 +1149,27 @@ class AudioEngine {
     return out;
   }
 
-  /** Turns a recording analysis into settings. Without one, a safe general-purpose clean is used. */
+  /**
+   * Turns a recording analysis into settings. The aim is a natural result: noise is turned down, not erased
+   * (the heavy cuts that remove every trace of noise make speech sound thin and "underwater"), and every
+   * correction is kept small unless the recording clearly needs it. Without an analysis a gentle
+   * general-purpose clean is used.
+   */
   recommendAutoClean(a = this.recordingAnalysis) {
-    const rec = { noiseReduction: 85, voiceBoost: 35, bgPreserve: 100, deReverb: 20, deEsser: 25, humHz: 60, highPass: 40,
-      eq: [0, 1.5, 0.5], masterVolume: 0, notes: [] };
+    const rec = { noiseReduction: 40, voiceBoost: 20, bgPreserve: 100, deReverb: 10, deEsser: 15, humHz: 0, highPass: 40,
+      eq: [0, 1.0, 0], comp: { threshold: -22, ratio: 2 }, masterVolume: 0, notes: [] };
     if (!a || !a.valid) return rec;
-    // How hard to clean depends on how noisy the recording is: gentle on clean audio, firmer on noisy audio
-    rec.noiseReduction = Math.max(35, Math.min(90, Math.round(95 - (a.snrDb - 5) * 1.5)));
-    rec.notes.push(a.snrDb >= 35 ? 'clean recording, light noise reduction' : a.snrDb >= 20 ? 'moderate background noise' : 'noisy recording, stronger noise reduction');
+    // Noise stems are turned down by about 9 dB on clean audio up to about 22 dB on noisy audio
+    rec.noiseReduction = Math.max(25, Math.min(55, Math.round(55 - (a.snrDb - 5) * 0.9)));
+    rec.notes.push(a.snrDb >= 35 ? 'clean recording, very light noise reduction' : a.snrDb >= 20 ? 'moderate background noise reduced' : 'noisy recording, noise reduced');
     rec.humHz = a.humHz;                                   // 0 = no hum found, leave the notch off
     if (a.humHz) rec.notes.push(`${a.humHz} Hz hum removed`);
-    rec.highPass = a.rumbleDb > -12 ? 80 : 40;
+    rec.highPass = a.rumbleDb > -8 ? 80 : 40;
     if (rec.highPass === 80) rec.notes.push('low rumble cut');
-    rec.deEsser = a.sibilanceDb > -12 ? 40 : a.sibilanceDb > -16 ? 25 : 10;
-    rec.deReverb = a.snrDb < 20 ? 25 : 20;
+    rec.deEsser = a.sibilanceDb > -12 ? 30 : a.sibilanceDb > -16 ? 20 : 10;
+    rec.deReverb = a.snrDb < 20 ? 15 : 10;
     // Bring quiet speech up to a comfortable level (never turns loud recordings down)
-    rec.masterVolume = Math.max(0, Math.min(15, Math.round((-20 - a.speechDb) * 2) / 2));
+    rec.masterVolume = Math.max(0, Math.min(9, Math.round((-20 - a.speechDb) * 2) / 2));
     if (rec.masterVolume >= 1) rec.notes.push(`volume +${rec.masterVolume} dB`);
     return rec;
   }
@@ -1138,14 +1178,15 @@ class AudioEngine {
   applyAutoClean(rec = this.recommendAutoClean()) {
     this.applyPreset('reset_unity');
     this.applyMacros(rec.noiseReduction, rec.voiceBoost, rec.bgPreserve);
-    this.setStemGain('music', -12 * Math.min(1, rec.noiseReduction / 85));
-    if (rec.humHz) this.setStemGain('hum', -40);
+    this.setStemGain('music', -6);
+    if (rec.humHz) this.setStemGain('hum', -30);
     this.setDeHum(rec.humHz === 50 ? '50hz' : rec.humHz === 60 ? '60hz' : 'off');
     this.setHighPassFilter(rec.highPass);
     this.setDeEsser(rec.deEsser);
     this.setDeReverb(rec.deReverb);
     this.setEQ(rec.eq[0], rec.eq[1], rec.eq[2]);
     this.setMasterVolume(rec.masterVolume);
+    if (rec.comp) this.setCompressor(rec.comp.threshold, rec.comp.ratio, 15, 250);
     this.updateAllStemGains();
     return rec;
   }

@@ -7,6 +7,7 @@
 document.addEventListener('DOMContentLoaded', () => {
   // Instances
   const audioEngine = new AudioEngine();
+  window.__audioEngine = audioEngine;   // debugging and automated tests
   let visualizer = null;
   let currentFile = null;
   let ffprobeData = null;
@@ -77,7 +78,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ==========================================================================
   // Audio Cleaning Studio — prepared on demand so metadata appears instantly
   // ==========================================================================
-  const PREWARM_MAX_BYTES = 25 * 1024 * 1024;
+  const PREWARM_MAX_BYTES = 250 * 1024 * 1024;   // bigger files wait until the cleaning tab is opened
   let studioState = 'idle'; // idle | loading | ready | error
   let studioPromise = null;
   let pendingAudioBytes = null;
@@ -243,7 +244,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     studioPromise = (async () => {
       try {
-        await audioEngine.decodeAudio(bytes);
+        const t0 = performance.now();
+        const rate = ffprobeData && ffprobeData.streams && (ffprobeData.streams.find(st => st.codec_type === 'audio') || {}).sample_rate;
+        await audioEngine.decodeAudio(bytes, parseInt(rate, 10) || 0);
+        const tDecoded = performance.now();
         if (currentFile !== file || (signal && signal.aborted)) return;
         // Long recordings: the studio previews a few minutes; the download covers all of it
         // Judge the whole recording once, so every part of it gets the same automatic settings
@@ -271,6 +275,7 @@ document.addEventListener('DOMContentLoaded', () => {
         updateExcerptBar();
         studioState = 'ready';
         setStudioBusy(false);
+        console.info(`[FileLens] decode ${((tDecoded - t0) / 1000).toFixed(1)}s, analysis ${((performance.now() - tDecoded) / 1000).toFixed(1)}s ${JSON.stringify(audioEngine.timings || {})}`);
       } catch (err) {
         if (err && err.name === 'AbortError') { studioState = 'idle'; setStudioBusy(false); return; }
         console.warn('Studio preparation failed:', err);
@@ -745,8 +750,8 @@ document.addEventListener('DOMContentLoaded', () => {
       lastFileBytes = arrayBuffer;
 
       if (hasAudio) {
-        // Audio decoding + noise analysis is heavy, so it happens when the cleaning tab is
-        // opened (or quietly in the background for normal-sized files).
+        // Decoding runs off the main thread and the analysis on background workers, so start them right
+        // away: by the time the cleaning tab is opened it is usually ready.
         pendingAudioBytes = arrayBuffer;
         if (nonAudioNotice) nonAudioNotice.style.display = 'none';
         if (file.size <= PREWARM_MAX_BYTES) {
@@ -2335,6 +2340,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (groupHighPass) groupHighPass.querySelectorAll('.btn-segmented').forEach(b => b.classList.toggle('active', b.dataset.hp === String(rec.highPass)));
     if (lblHighPass) lblHighPass.textContent = rec.highPass === 80 ? '80 Hz (Vocal Clean)' : '40 Hz (Standard)';
+    if (rec.comp && compThreshold && compRatio) {
+      compThreshold.value = rec.comp.threshold; lblCompThreshold.textContent = `${rec.comp.threshold} dB`;
+      compRatio.value = rec.comp.ratio; lblCompRatio.textContent = `${rec.comp.ratio.toFixed(1)}:1`;
+    }
 
     syncPresetUi('cafe_preserve_voices');
     syncMixerUiFromEngine();
