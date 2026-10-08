@@ -1,5 +1,5 @@
 /**
- * Verification test for SpectraClean AI Audio Engine & Component Decomposition
+ * Verification test for FileLens Audio Engine & Component Decomposition
  */
 global.window = global;
 const fs = require('fs');
@@ -8,7 +8,7 @@ const fs = require('fs');
 const audioEngineCode = fs.readFileSync('public/js/audio-engine.js', 'utf8');
 eval(audioEngineCode);
 
-console.log("=== SpectraClean AI Engine Unit Test ===");
+console.log("=== FileLens Engine Unit Test ===");
 
 // 1. Verify FastFFT
 const fftSize = 1024;

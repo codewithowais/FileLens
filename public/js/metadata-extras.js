@@ -1,5 +1,5 @@
 /**
- * SpectraClean - Extra metadata extractors
+ * FileLens - Extra metadata extractors
  *
  *  - Full EXIF (camera, exposure, lens, UserComment) incl. GPS location
  *  - EXIF discovery inside HEIC / AVIF / WebP / TIFF files

@@ -1,5 +1,5 @@
 /**
- * SpectraClean AI - Universal File Metadata & Forensic Inspector
+ * FileLens - Universal File Metadata & Forensic Inspector
  * Extracts ALL metadata from ANY kind of file:
  * - Video & Containers: MP4, M4V, MOV, 3GP, WebM, MKV, AVI
  * - Audio: WAV, BWF, MP3 (ID3v1 & ID3v2.2/3/4), FLAC, OGG, Opus, AAC, M4A

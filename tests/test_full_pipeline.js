@@ -1,5 +1,5 @@
 /**
- * Full Pipeline Verification Test for SpectraClean AI
+ * Full Pipeline Verification Test for FileLens
  * Tests real sample audio decomposition, energy measurement,
  * and audio reconstruction.
  */
@@ -15,7 +15,7 @@ eval(fs.readFileSync('public/js/ai-detector.js', 'utf8'));
 const ffprobeCode = fs.readFileSync('public/js/ffprobe-parser.js', 'utf8');
 eval(ffprobeCode);
 
-console.log("=== Testing SpectraClean AI Full Pipeline ===");
+console.log("=== Testing FileLens Full Pipeline ===");
 
 // 1. Test FFprobe on real WAV file
 const wavFileBuf = fs.readFileSync('samples/sample_interview_with_noise.wav');

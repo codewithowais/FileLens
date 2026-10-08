@@ -1,5 +1,5 @@
 /**
- * SpectraClean AI - Lossless MP4 Audio Replacement Engine
+ * FileLens - Lossless MP4 Audio Replacement Engine
  * Replaces the audio track inside the original MP4 container
  * without re-encoding video frames!
  */

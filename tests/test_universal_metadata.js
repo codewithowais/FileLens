@@ -85,7 +85,7 @@ async function runTests() {
   console.log('   ✅ PNG parsed successfully!\n');
 
   // 4. Test Synthetic PDF Document
-  const pdfString = "%PDF-1.7\n1 0 obj\n<< /Title (Confidential Audio Report) /Author (SpectraClean AI) >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF";
+  const pdfString = "%PDF-1.7\n1 0 obj\n<< /Title (Confidential Audio Report) /Author (FileLens) >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF";
   const pdfBuf = Buffer.from(pdfString, 'utf8');
   const pdfArrayBuf = pdfBuf.buffer.slice(pdfBuf.byteOffset, pdfBuf.byteOffset + pdfBuf.byteLength);
   const pdfMeta = await script.parse({ name: 'report.pdf', size: pdfBuf.length }, pdfArrayBuf);

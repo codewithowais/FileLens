@@ -1,5 +1,5 @@
 /**
- * SpectraClean - C2PA (Content Credentials) verifier
+ * FileLens - C2PA (Content Credentials) verifier
  *
  * Reads the signed provenance manifest embedded in a file and checks it:
  *   1. The signature (COSE_Sign1) over the claim, using the certificate inside the manifest

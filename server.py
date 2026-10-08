@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SpectraClean AI - Local Web Server
+FileLens - Local Web Server
 Provides high-performance HTTP serving with:
 - Byte-range request support (Range: bytes=) for smooth video/audio seeking
 - Correct MIME type mapping (.wasm, .mp4, .m4a, .wav, .js)
@@ -34,7 +34,7 @@ mimetypes.add_type("audio/mpeg", ".mp3")
 mimetypes.add_type("application/json", ".json")
 
 
-class SpectraCleanHandler(http.server.BaseHTTPRequestHandler):
+class FileLensHandler(http.server.BaseHTTPRequestHandler):
     def end_headers(self):
         # Enable CORS and SharedArrayBuffer headers if needed
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -131,9 +131,9 @@ def run(port=PORT):
 
     server_address = ("127.0.0.1", port)
     try:
-        httpd = ReusableTCPServer(server_address, SpectraCleanHandler)
+        httpd = ReusableTCPServer(server_address, FileLensHandler)
         print(f"\n=======================================================")
-        print(f" SpectraClean AI Server Running!")
+        print(f" FileLens Server Running!")
         print(f" URL: http://localhost:{port}")
         print(f" Mode: Web Audio 32-bit Float + STFT Component Separation")
         print(f"=======================================================\n")

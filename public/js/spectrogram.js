@@ -1,5 +1,5 @@
 /**
- * SpectraClean AI - High-Resolution Spectrogram & Waveform Visualizer
+ * FileLens - High-Resolution Spectrogram & Waveform Visualizer
  * - Dual visual display: Interactive Waveform & Frequency Spectrogram
  * - Color-mapped decibel heat map (Inferno/Magma palette)
  * - Multi-Mode Spectrogram Viewing:

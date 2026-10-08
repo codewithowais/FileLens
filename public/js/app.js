@@ -1,5 +1,5 @@
 /**
- * SpectraClean AI - Master Application Controller
+ * FileLens - Master Application Controller
  * Wires together Audio Engine, Spectrogram Visualizer, FFprobe Inspector,
  * Multi-Stem Mixer Console, Transport, and Lossless Exporters.
  */
@@ -2045,14 +2045,14 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     }
 
-    localStorage.setItem('spectraclean_theme', normalized);
+    localStorage.setItem('filelens_theme', normalized);
 
     if (window.spectrogram && window.spectrogram.audioBuffer) {
       window.spectrogram.renderWaveform();
     }
   }
 
-  const savedTheme = localStorage.getItem('spectraclean_theme') || 'dark';
+  const savedTheme = localStorage.getItem('filelens_theme') || localStorage.getItem('spectraclean_theme') || 'dark';
   applyTheme(savedTheme);
 
   if (btnThemeToggle && themeDropdown) {
@@ -2088,13 +2088,13 @@ document.addEventListener('DOMContentLoaded', () => {
     document.body.classList.toggle('wf-quick', isQuick);
     if (btnWfQuick) btnWfQuick.classList.toggle('active', isQuick);
     if (btnWfPro) btnWfPro.classList.toggle('active', !isQuick);
-    localStorage.setItem('spectraclean_workflow', mode);
+    localStorage.setItem('filelens_workflow', mode);
   }
 
   if (btnWfQuick) btnWfQuick.addEventListener('click', () => setWorkflowMode('quick'));
   if (btnWfPro) btnWfPro.addEventListener('click', () => setWorkflowMode('pro'));
 
-  const savedWf = localStorage.getItem('spectraclean_workflow') || 'quick';
+  const savedWf = localStorage.getItem('filelens_workflow') || localStorage.getItem('spectraclean_workflow') || 'quick';
   setWorkflowMode(savedWf);
 
   // ==========================================================================

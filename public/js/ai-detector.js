@@ -1,5 +1,5 @@
 /**
- * SpectraClean - AI Origin Detector
+ * FileLens - AI Origin Detector
  *
  * Looks for the evidence AI tools leave inside a file and reports WHO made it, WHICH model,
  * WHEN and with WHAT settings. Evidence comes from:

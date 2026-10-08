@@ -1,5 +1,5 @@
 """
-Sample generator for SpectraClean AI.
+Sample generator for FileLens.
 Generates realistic multi-component test audio:
 - Main Voice (Foreground speaker)
 - Background Human Voices (Secondary ambient chatter)

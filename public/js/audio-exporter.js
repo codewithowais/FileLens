@@ -1,5 +1,5 @@
 /**
- * SpectraClean AI - Audio Exporter
+ * FileLens - Audio Exporter
  * Encodes AudioBuffer into studio-grade uncompressed WAV (16-bit/24-bit PCM)
  * and triggers instant file download.
  */

@@ -1,5 +1,5 @@
 /**
- * SpectraClean AI - Audio Engine
+ * FileLens - Audio Engine
  * High-performance Web Audio API processing engine:
  * - STFT Spectral Decomposition into 9 AI-Estimated Components
  * - Real-time Multi-Stem Mixer (Gain, Mute, Solo)

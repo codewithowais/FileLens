@@ -107,7 +107,7 @@ global.AudioContext = MockAudioContext;
 const audioEngineCode = fs.readFileSync('public/js/audio-engine.js', 'utf8');
 eval(audioEngineCode);
 
-console.log("=== Testing SpectraClean AI Playback Stopping & Control ===");
+console.log("=== Testing FileLens Playback Stopping & Control ===");
 
 const engine = new AudioEngine();
 engine.originalBuffer = {
