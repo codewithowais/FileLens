@@ -107,12 +107,35 @@ document.addEventListener('DOMContentLoaded', () => {
     return parts.reduce((acc, x) => acc * 60 + parseFloat(x), 0);
   }
 
-  // Shows the preview length, and the full length too when only a part of a long recording is previewed
+  // The player's clock and slider cover the WHOLE recording; only a part of it is loaded at a time.
+  function windowOffset() { return audioEngine.isExcerpt ? (audioEngine.excerptStart || 0) : 0; }
+  function totalDuration() { return audioEngine.isExcerpt && audioEngine.fullBuffer ? audioEngine.fullBuffer.duration : audioEngine.getDuration(); }
   function updateDurationLabel() {
-    if (!durationDisplay) return;
-    const preview = formatTime(audioEngine.getDuration());
-    durationDisplay.textContent = audioEngine.isExcerpt && audioEngine.fullBuffer
-      ? `${preview} preview of ${formatTime(audioEngine.fullBuffer.duration)}` : preview;
+    if (durationDisplay) durationDisplay.textContent = formatTime(totalDuration());
+  }
+  function refreshTransport() {
+    const total = totalDuration(), t = windowOffset() + audioEngine.getCurrentTime();
+    if (currentTimeDisplay) currentTimeDisplay.textContent = formatTime(t);
+    if (timelineScrubber && total > 0) timelineScrubber.value = (t / total) * 100;
+  }
+  /** Jump anywhere in the whole recording, loading the part that contains it when needed. */
+  async function seekGlobal(t, resume) {
+    const total = totalDuration();
+    if (!(total > 0)) return;
+    t = Math.max(0, Math.min(total - 0.05, t));
+    const off = windowOffset(), len = audioEngine.getDuration();
+    if (!audioEngine.isExcerpt || (t >= off && t < off + len - 0.05)) {
+      audioEngine.seek(t - off);
+    } else {
+      showToast('Loading that part of the recording…', 'info', 2500);
+      await previewFrom(t);
+      if (studioState !== 'ready') return;
+      audioEngine.seek(Math.max(0, t - windowOffset()));
+    }
+    if (previewVideo && currentFile && currentFile.type.includes('video')) previewVideo.currentTime = t;
+    refreshTransport();
+    if (visualizer && visualizer.updatePlayhead) visualizer.updatePlayhead(audioEngine.getCurrentTime());
+    if (resume && !audioEngine.isPlaying) togglePlayPause();
   }
 
   function updateExcerptBar() {
@@ -151,6 +174,7 @@ document.addEventListener('DOMContentLoaded', () => {
       syncPresetUi(activePreset ? activePreset.preset : null);
       updateProcessedWaveformPreview();
       updateExcerptBar();
+      refreshTransport();
       studioState = 'ready';
     } catch (err) {
       if (!(err && err.name === 'AbortError')) {
@@ -2441,37 +2465,37 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let scrubberRaf = null;
   timelineScrubber.addEventListener('input', (e) => {
-    const duration = audioEngine.getDuration();
-    if (duration > 0) {
-      const val = parseFloat(e.target.value);
+    const total = totalDuration();
+    if (!(total > 0)) return;
+    const target = (parseFloat(e.target.value) / 100) * total;
+    const off = windowOffset(), len = audioEngine.getDuration();
+    if (currentTimeDisplay) currentTimeDisplay.textContent = formatTime(target);
+    // Inside the loaded part: seek live while dragging. Outside it: wait until the slider is released.
+    if (!audioEngine.isExcerpt || (target >= off && target < off + len - 0.05)) {
       if (!scrubberRaf) {
         scrubberRaf = requestAnimationFrame(() => {
           scrubberRaf = null;
-          const seekSec = (val / 100) * duration;
-          audioEngine.seek(seekSec);
-          if (previewVideo && currentFile && currentFile.type.includes('video')) {
-            previewVideo.currentTime = seekSec + (audioEngine.excerptStart || 0);
-          }
+          seekGlobal(target, false);
         });
       }
     }
   });
+  timelineScrubber.addEventListener('change', (e) => {
+    const total = totalDuration();
+    if (!(total > 0) || studioState !== 'ready') return;
+    const target = (parseFloat(e.target.value) / 100) * total;
+    const off = windowOffset(), len = audioEngine.getDuration();
+    if (audioEngine.isExcerpt && (target < off || target >= off + len - 0.05)) seekGlobal(target, audioEngine.isPlaying);
+  });
 
   // ---- Rewind / fast-forward -------------------------------------------------------------------
   function jumpTo(t) {
-    const dur = audioEngine.getDuration();
-    if (!(dur > 0)) return;
-    t = Math.max(0, Math.min(dur - 0.05, t));
-    audioEngine.seek(t);
-    if (previewVideo && currentFile && currentFile.type.includes('video')) previewVideo.currentTime = t + (audioEngine.excerptStart || 0);
-    // keep the display right even while paused (the animation loop only runs during playback)
-    timelineScrubber.value = (t / dur) * 100;
-    if (currentTimeDisplay) currentTimeDisplay.textContent = formatTime(t);
-    if (visualizer && visualizer.updatePlayhead) visualizer.updatePlayhead(t);
+    if (studioState !== 'ready') return;
+    seekGlobal(t, audioEngine.isPlaying);
   }
   function skipBy(delta) {
     if (!audioEngine.originalBuffer) return;
-    jumpTo(audioEngine.getCurrentTime() + delta);
+    jumpTo(windowOffset() + audioEngine.getCurrentTime() + delta);
   }
 
   // Click = jump 10 s. Press and hold = scan quickly (about 16x) until released.
@@ -2541,8 +2565,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     setPlayButtonState(false);
     cancelAnimationFrame(animationFrameId);
-    currentTimeDisplay.textContent = formatTime(0);
-    timelineScrubber.value = 0;
+    refreshTransport();
     visualizer.updatePlayhead(0);
     if (vuMeterBar) vuMeterBar.style.width = '0%';
     if (vuDbReadout) vuDbReadout.textContent = '-INF dB';
@@ -2559,10 +2582,9 @@ document.addEventListener('DOMContentLoaded', () => {
       if (audioEngine.isPlaying) {
         const curTime = audioEngine.getCurrentTime();
         const duration = audioEngine.getDuration();
-        currentTimeDisplay.textContent = formatTime(curTime);
+        refreshTransport();
 
         if (duration > 0) {
-          timelineScrubber.value = (curTime / duration) * 100;
           visualizer.updatePlayhead(curTime);
 
           // Keep video in sync with audio
