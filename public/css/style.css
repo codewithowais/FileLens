@@ -2605,6 +2605,7 @@ body { font-size: 14.5px; line-height: 1.5; }
 .excerpt-text { flex: 1 1 360px; min-width: 0; }
 .excerpt-controls { display: flex; align-items: center; gap: var(--s2); }
 .excerpt-controls { flex-wrap: wrap; }
+.prefetch-status { font-size: .78rem; color: var(--text-muted); }
 .original-player { flex: 1 1 100%; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3); }
 .original-player audio { flex: 1 1 320px; min-width: 0; height: 40px; }
 .original-player-note { font-size: .8rem; color: var(--text-muted); }

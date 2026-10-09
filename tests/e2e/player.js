@@ -111,9 +111,26 @@ const clock = (txt) => { const m = txt.trim().split(':').map(Number); return m.l
   const back = clock((await state()).cur);
   check(`Left arrow goes back 5 s (${after} → ${back})`, near(after - back, 5 - 0.7, 1.5));
 
+  // the next part is prepared in the background while this one plays
+  const noPrefetch = !!process.env.E2E_NO_PREFETCH;                 // baseline for comparing hand-over times
+  if (noPrefetch) await page.evaluate(() => { window.__audioEngine.prefetchBudget = 1; window.__audioEngine.cancelPrefetch(); });
+  else {
+    await page.waitForFunction(() => /ready/.test((document.getElementById('prefetchStatus') || {}).textContent || ''), null, { timeout: 120000 });
+    check(`Next part is prepared in the background (“${await page.evaluate(() => document.getElementById('prefetchStatus').textContent)}”)`, true);
+  }
+  // sample the player every 20 ms so the length of the pause at the hand-over can be measured
+  await page.evaluate(() => { window.__samples = []; window.__sampler = setInterval(() => { const e = window.__audioEngine; window.__samples.push([performance.now(), e.isPlaying, e.excerptStart]); }, 20); });
+
   // auto-advance into the next part while playing
   await drag(176, MIN * 60); await page.waitForTimeout(500);
   await waitWindow(180).catch(() => {}); await page.waitForTimeout(1500); s = await state(); ph = await pitchHere();
+  const gap = await page.evaluate(() => {
+    clearInterval(window.__sampler); const sm = window.__samples; let lastOld = -1, firstNew = -1;
+    for (let i = 0; i < sm.length; i++) { if (sm[i][2] < 1 && sm[i][1]) lastOld = i; if (sm[i][2] >= 179 && sm[i][1]) { firstNew = i; break; } }
+    return lastOld >= 0 && firstNew >= 0 ? Math.round(sm[firstNew][0] - sm[lastOld][0]) : -1;
+  });
+  console.log(`   hand-over pause: ${gap} ms (${noPrefetch ? 'prefetch off' : 'prefetch on'})`);
+  if (!noPrefetch) check(`Hand-over pause is short with the next part prepared (${gap} ms)`, gap >= 0 && gap < 2500);
   check(`Playback continues into the next part by itself (window starts ${s.start.toFixed(0)} s, playing=${s.playing}, clock ${s.cur})`, near(s.start, 180, 1) && s.playing && clock(s.cur) >= 180);
   check(`…and plays minute 3 (${ph.hz} Hz, expect ${expectHz(3)})`, near(ph.hz, expectHz(3), 8));
 

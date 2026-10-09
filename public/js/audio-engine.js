@@ -372,6 +372,7 @@ class AudioEngine {
    * Decodes an ArrayBuffer (from uploaded file) into an AudioBuffer.
    */
   async decodeAudio(arrayBuffer, sampleRateHint = 0) {
+    this.cancelPrefetch();                  // anything prepared belongs to the previous file
     this.useContextRate(sampleRateHint);   // 0 (unknown rate) goes back to the browser default
     this.initAudioContext();
     // Clone array buffer because decodeAudioData detaches it
@@ -423,17 +424,115 @@ class AudioEngine {
   /**
    * Chooses the part of the recording the studio previews. Recordings up to `maxSec` are used whole.
    */
-  setExcerpt(startSec = 0, maxSec = AudioEngine.MAX_PREVIEW_SECONDS) {
+  /** The part of the recording that starts at `startSec`: where it really starts (it cannot run past the end) and its length, in samples. */
+  excerptGeometry(startSec, maxSec = this.previewSeconds || AudioEngine.MAX_PREVIEW_SECONDS) {
+    const full = this.fullBuffer || this.originalBuffer;
+    const sr = full.sampleRate, total = full.length;
+    const len = Math.min(total, Math.round(maxSec * sr));
+    const start = len >= total ? 0 : Math.max(0, Math.min(total - len, Math.round(startSec * sr)));
+    return { full, sr, total, len, start, whole: len >= total };
+  }
+
+  /** Copies the part of the recording that starts at `startSec` into its own buffer. */
+  makeExcerpt(startSec = 0, maxSec = this.previewSeconds || AudioEngine.MAX_PREVIEW_SECONDS) {
+    const g = this.excerptGeometry(startSec, maxSec);
+    if (g.whole) return { buffer: g.full, start: 0, isExcerpt: false };
+    const b = this.audioContext.createBuffer(g.full.numberOfChannels, g.len, g.sr);
+    for (let c = 0; c < g.full.numberOfChannels; c++) b.copyToChannel(g.full.getChannelData(c).subarray(g.start, g.start + g.len), c);
+    return { buffer: b, start: g.start / g.sr, isExcerpt: true };
+  }
+
+  setExcerpt(startSec = 0, maxSec = this.previewSeconds || AudioEngine.MAX_PREVIEW_SECONDS) {
     const full = this.fullBuffer || this.originalBuffer;
     if (!full) return;
     this.fullBuffer = full;
-    const sr = full.sampleRate, total = full.length;
-    const len = Math.min(total, Math.round(maxSec * sr));
-    if (len >= total) { this.originalBuffer = full; this.isExcerpt = false; this.excerptStart = 0; return; }
-    const start = Math.max(0, Math.min(total - len, Math.round(startSec * sr)));
-    const b = this.audioContext.createBuffer(full.numberOfChannels, len, sr);
-    for (let c = 0; c < full.numberOfChannels; c++) b.copyToChannel(full.getChannelData(c).subarray(start, start + len), c);
-    this.originalBuffer = b; this.isExcerpt = true; this.excerptStart = start / sr;
+    const ex = this.makeExcerpt(startSec, maxSec);
+    this.originalBuffer = ex.buffer; this.isExcerpt = ex.isExcerpt; this.excerptStart = ex.start;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Prefetch: while one part plays, the next part is split into its layers in the background, so the
+  // hand-over (or a jump to it) does not have to wait
+  // -------------------------------------------------------------------------------------------
+
+  /** Memory limit for the decoded recording plus two parts' worth of layers (bytes). */
+  static get PREFETCH_BUDGET_BYTES() { return 3 * 1024 * 1024 * 1024; }
+
+  /** True when holding the current and the next part at once fits the memory budget. */
+  canPrefetch() {
+    const g = this.excerptGeometry(0);
+    const ch = g.full.numberOfChannels, layers = this.componentDefs.length;
+    const fullBytes = g.total * ch * 4, partBytes = layers * g.len * ch * 4;
+    return fullBytes + 2 * partBytes <= (this.prefetchBudget || AudioEngine.PREFETCH_BUDGET_BYTES);
+  }
+
+  _setPrefetchState(state) { if (this.onPrefetchState) { try { this.onPrefetchState(state); } catch (e) {} } }
+
+  /**
+   * Starts splitting the part that begins at `startSec` in the background. Does nothing when it is already
+   * ready or running, when there is no next part, or when memory would not allow it.
+   */
+  startPrefetch(startSec) {
+    if (!this.fullBuffer || !this.isExcerpt || !this.stems.main_voice) return false;
+    if (startSec >= this.fullBuffer.duration - 0.5) return false;
+    const g = this.excerptGeometry(startSec);
+    const pf = this._pf;
+    if (pf && pf.source === g.full && pf.key === g.start) return true;
+    this.cancelPrefetch();
+    if (!this.canPrefetch()) return false;
+    const ac = typeof AbortController !== 'undefined' ? new AbortController() : { signal: null, abort() {} };
+    const job = { key: g.start, source: g.full, state: 'running', abort: ac, result: null, promise: null };
+    this._pf = job;
+    this._setPrefetchState('running');
+    const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
+    job.promise = (async () => {
+      try {
+        const ex = this.makeExcerpt(startSec);
+        // leave a core or two free so the playing audio and the page stay smooth
+        const r = await this.decomposeBuffer(ex.buffer, () => {}, ac.signal, { maxWorkers: Math.max(1, cores - 2) });
+        if (this._pf !== job) return;
+        job.result = { buffer: ex.buffer, start: ex.start, stems: r.stems, energy: r.energy };
+        job.state = 'ready';
+        this._setPrefetchState('ready');
+      } catch (e) {
+        if (this._pf === job) { this._pf = null; this._setPrefetchState('idle'); }
+      }
+    })();
+    return true;
+  }
+
+  /** True when the part starting at `startSec` is already split and waiting. */
+  prefetchReadyFor(startSec) {
+    const pf = this._pf;
+    if (!pf || pf.state !== 'ready' || !this.fullBuffer) return false;
+    const g = this.excerptGeometry(startSec);
+    return pf.source === g.full && pf.key === g.start;
+  }
+
+  /**
+   * Makes the prefetched part the live one if it is the part starting at `startSec` (waiting for it when it is
+   * still being prepared). Anything else that was being prepared is dropped. Returns whether it was used.
+   */
+  async adoptPrefetched(startSec) {
+    const pf = this._pf;
+    if (!pf || !this.fullBuffer) return false;
+    const g = this.excerptGeometry(startSec);
+    if (pf.source !== g.full || pf.key !== g.start) { this.cancelPrefetch(); return false; }
+    if (pf.state === 'running') await pf.promise;
+    if (this._pf !== pf || pf.state !== 'ready') return false;
+    const r = pf.result;
+    this._pf = null; this._setPrefetchState('idle');
+    this.originalBuffer = r.buffer; this.isExcerpt = true; this.excerptStart = r.start;
+    this._installStems({ stems: r.stems, energy: r.energy }, false);          // keeps the user's gains
+    return true;
+  }
+
+  cancelPrefetch() {
+    const pf = this._pf;
+    if (!pf) return;
+    this._pf = null;
+    try { pf.abort.abort(); } catch (e) {}
+    this._setPrefetchState('idle');
   }
 
   /** The gain each stem should have right now (mute / solo / fader), in componentDefs order. */
@@ -571,12 +670,12 @@ class AudioEngine {
   static get WARMUP_FRAMES() { return 16; }
 
   /** How many parallel segments to split `numFrames` into (1 = no splitting). */
-  planSegments(numFrames) {
+  planSegments(numFrames, maxWorkers = 0) {
     if (this.segmentCount) return Math.max(1, Math.min(this.segmentCount, numFrames));
     if (numFrames < 1500) return 1; // under ~17 s: splitting is not worth it
     const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
     const canWork = typeof Worker !== 'undefined' && this.useWorkers !== false;
-    return canWork ? Math.max(1, Math.min(8, cores)) : 1;
+    return canWork ? Math.max(1, Math.min(8, maxWorkers || cores)) : 1;
   }
 
   /**
@@ -699,15 +798,34 @@ class AudioEngine {
    */
   async analyzeAndDecompose(progressCallback = () => {}, abortSignal = null) {
     if (!this.originalBuffer) throw new Error("No audio loaded");
-    if (abortSignal && abortSignal.aborted) throw AudioEngine.abortError();
+    const r = await this.decomposeBuffer(this.originalBuffer, progressCallback, abortSignal);
+    this._installStems(r, true);
+    this.timings = r.timings;
+    return { stems: this.stems, energy: this.componentEnergy };
+  }
 
-    const sampleRate = this.originalBuffer.sampleRate;
-    const numChannels = this.originalBuffer.numberOfChannels;
-    const numSamples = this.originalBuffer.length;
+  /** Makes a decomposition the live one. `resetGains` puts every layer back to 0 dB (a fresh analysis). */
+  _installStems(r, resetGains) {
+    for (const id of Object.keys(r.stems)) {
+      this.stems[id] = r.stems[id];
+      if (resetGains) { this.stemValues[id] = 1.0; this.stemMutes[id] = false; this.stemSolos[id] = false; }
+    }
+    Object.assign(this.componentEnergy, r.energy);
+  }
+
+  /**
+   * Splits `buffer` (a part of the recording, or all of it) into the nine layers without touching the live
+   * state, so it can also run in the background for a part that is not playing yet.
+   */
+  async decomposeBuffer(buffer, progressCallback = () => {}, abortSignal = null, opts = {}) {
+    if (abortSignal && abortSignal.aborted) throw AudioEngine.abortError();
+    const sampleRate = buffer.sampleRate;
+    const numChannels = buffer.numberOfChannels;
+    const numSamples = buffer.length;
     // Masks are estimated from a mono (mid) mix, then applied to each channel so the
     // stereo image of the original is preserved in every stem.
-    const inputLeft = this.originalBuffer.getChannelData(0);
-    const inputRight = numChannels > 1 ? this.originalBuffer.getChannelData(1) : inputLeft;
+    const inputLeft = buffer.getChannelData(0);
+    const inputRight = numChannels > 1 ? buffer.getChannelData(1) : inputLeft;
     const isStereo = numChannels > 1;
 
     const { fftSize, hopSize } = AudioEngine.STFT;
@@ -719,7 +837,7 @@ class AudioEngine {
 
     const tStart = AudioEngine.now();
     // Pass 1: learn the background noise from the WHOLE recording (not just the preview window)
-    const { noiseFloor } = await this.getNoiseStats(this.fullBuffer || this.originalBuffer,
+    const { noiseFloor } = await this.getNoiseStats(this.fullBuffer || buffer,
       (p) => progressCallback(0.1 + 0.3 * p, "AI Spectral Modeling: Estimating Acoustic Floors & Formants..."), abortSignal);
     const tNoise = AudioEngine.now();
 
@@ -738,7 +856,7 @@ class AudioEngine {
     // Pass 2: multi-component spectral masking and inverse STFT synthesis. The frames are split into
     // segments that run in parallel on background workers (or one after another when workers are
     // unavailable); each segment's output is added into the stems where they overlap.
-    const segCount = numFrames < 1 ? 0 : this.planSegments(numFrames);   // under one frame (~46 ms): nothing to separate
+    const segCount = numFrames < 1 ? 0 : this.planSegments(numFrames, opts.maxWorkers);   // under one frame (~46 ms): nothing to separate
     const bounds = [];
     for (let g = 0; g < segCount; g++) bounds.push([Math.floor(numFrames * g / segCount), Math.floor(numFrames * (g + 1) / segCount)]);
     const segProgress = new Array(segCount).fill(0);
@@ -771,16 +889,14 @@ class AudioEngine {
     // Energy percentages for UI display
     let totalAllEnergy = 0;
     for (let s = 0; s < numStems; s++) totalAllEnergy += energyAccumArr[s];
-    for (let s = 0; s < numStems; s++) this.componentEnergy[stemIds[s]] = totalAllEnergy > 0 ? (energyAccumArr[s] / totalAllEnergy) * 100 : 0;
-    for (const id of stemIds) {
-      this.stems[id] = stemBuffers[id];
-      this.stemValues[id] = 1.0; this.stemMutes[id] = false; this.stemSolos[id] = false;
-    }
+    const energy = {};
+    for (let s = 0; s < numStems; s++) energy[stemIds[s]] = totalAllEnergy > 0 ? (energyAccumArr[s] / totalAllEnergy) * 100 : 0;
     const tEnd = AudioEngine.now();
-    this.timings = { noiseStatsMs: Math.round(tNoise - tStart), synthMs: Math.round(tSynth - tNoise), finishMs: Math.round(tEnd - tSynth), segments: segCount };
+    const timings = { noiseStatsMs: Math.round(tNoise - tStart), synthMs: Math.round(tSynth - tNoise), finishMs: Math.round(tEnd - tSynth), segments: segCount };
     progressCallback(1.0, "AI Decomposition Complete: 9 Component Layers Isolated.");
-    return { stems: this.stems, energy: this.componentEnergy };
+    return { stems: stemBuffers, energy, timings };
   }
+
 
   /**
    * Sets stem gain in decibels (-40dB to +12dB).

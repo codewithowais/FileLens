@@ -151,6 +151,25 @@ document.addEventListener('DOMContentLoaded', () => {
     if (resume && !audioEngine.isPlaying) togglePlayPause();
   }
 
+  // Background preparation of the next part, shown under the long-recording note
+  let prefetchState = 'idle';
+  function renderPrefetchStatus() {
+    const el = document.getElementById('prefetchStatus');
+    if (!el) return;
+    el.textContent = prefetchState === 'running' ? 'Preparing the next part in the background…'
+      : prefetchState === 'ready' ? 'The next part is ready: playback will carry on without waiting.' : '';
+  }
+  audioEngine.onPrefetchState = (st) => { prefetchState = st; renderPrefetchStatus(); };
+  let lastPrefetchCheck = 0;
+  /** While a long recording plays, prepare the part that comes after the current one. */
+  function maybePrefetch(force) {
+    const now = performance.now();
+    if (!force && now - lastPrefetchCheck < 1000) return;
+    lastPrefetchCheck = now;
+    if (studioState !== 'ready' || !audioEngine.isExcerpt || !audioEngine.isPlaying || scrubbing || !audioEngine.originalBuffer) return;
+    audioEngine.startPrefetch(audioEngine.excerptStart + audioEngine.originalBuffer.duration);
+  }
+
   function updateExcerptBar() {
     const bar = document.getElementById('excerptBar');
     const long = audioEngine.isExcerpt && audioEngine.fullBuffer;
@@ -162,7 +181,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const total = audioEngine.fullBuffer.duration, start = audioEngine.excerptStart, len = audioEngine.originalBuffer.duration;
     document.getElementById('excerptText').innerHTML =
       `<strong>Long recording (${fmtClock(total)}).</strong> You are previewing ${fmtClock(start)}–${fmtClock(start + len)}. ` +
-      `Playback continues into the next part automatically. Whatever you set here is applied to the <strong>whole recording</strong> when you download.`;
+      `Playback continues into the next part automatically. Whatever you set here is applied to the <strong>whole recording</strong> when you download.` +
+      `<br><span id="prefetchStatus" class="prefetch-status"></span>`;
+    renderPrefetchStatus();
     document.getElementById('excerptStart').value = fmtClock(start);
     bar.style.display = 'flex';
   }
@@ -172,11 +193,17 @@ document.addEventListener('DOMContentLoaded', () => {
     stopPlayback();
     const snap = { values: { ...audioEngine.stemValues }, mutes: { ...audioEngine.stemMutes }, solos: { ...audioEngine.stemSolos } };
     const activePreset = (document.querySelector('.btn-preset.active-preset') || {}).dataset;
-    studioState = 'loading'; setStudioBusy(true); setStudioProgress(0.02, 'Preparing the preview…');
+    studioState = 'loading';
+    // A part that was prepared in the background is swapped in at once, without the loading screen
+    const prepared = audioEngine.prefetchReadyFor(startSec);
+    if (!prepared) { setStudioBusy(true); setStudioProgress(0.02, 'Preparing the preview…'); }
     try {
-      audioEngine.setExcerpt(startSec, AudioEngine.MAX_PREVIEW_SECONDS);
-      await audioEngine.analyzeAndDecompose((p, m) => setStudioProgress(0.05 + 0.93 * p, `${m} (${Math.floor(p * 100)}%)`),
-        activeAbortController ? activeAbortController.signal : undefined);
+      if (!(await audioEngine.adoptPrefetched(startSec))) {
+        if (prepared) setStudioBusy(true);
+        audioEngine.setExcerpt(startSec, AudioEngine.MAX_PREVIEW_SECONDS);
+        await audioEngine.analyzeAndDecompose((p, m) => setStudioProgress(0.05 + 0.93 * p, `${m} (${Math.floor(p * 100)}%)`),
+          activeAbortController ? activeAbortController.signal : undefined);
+      }
       Object.assign(audioEngine.stemValues, snap.values); Object.assign(audioEngine.stemMutes, snap.mutes); Object.assign(audioEngine.stemSolos, snap.solos);
       audioEngine.updateAllStemGains();
       renderMixerStrips(audioEngine.componentDefs, audioEngine.componentEnergy);
@@ -728,6 +755,7 @@ document.addEventListener('DOMContentLoaded', () => {
   async function handleIncomingFile(file) {
     stopPlayback();
     closeOriginalPlayer();
+    audioEngine.cancelPrefetch();
     // Each file gets its own abort signal so a previous file's background work stops
     if (activeAbortController) activeAbortController.abort();
     activeAbortController = new AbortController();
@@ -2573,6 +2601,7 @@ document.addEventListener('DOMContentLoaded', () => {
       cancelAnimationFrame(animationFrameId);
     } else {
       audioEngine.play();
+      maybePrefetch(true);
       if (previewVideo && currentFile && currentFile.type.includes('video')) {
         previewVideo.currentTime = audioEngine.getCurrentTime() + (audioEngine.excerptStart || 0);
         try { previewVideo.play(); } catch (e) {}
@@ -2610,6 +2639,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const curTime = audioEngine.getCurrentTime();
         const duration = audioEngine.getDuration();
         refreshTransport();
+        maybePrefetch(false);
 
         if (duration > 0) {
           visualizer.updatePlayhead(curTime);
